@@ -1,0 +1,97 @@
+#: model.py:63
+msgid "WMS connection"
+msgstr "Соединение WMS"
+
+#: model.py:153
+msgid "WMS capabilities"
+msgstr "Возможности WMS"
+
+#: model.py:154 nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:166
+msgid "Image format"
+msgstr "Формат изображения"
+
+#: model.py:251
+msgid "WMS layer"
+msgstr "Слой WMS"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:25
+msgid "Query"
+msgstr "Запросить"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:26
+msgid "Clear"
+msgstr "Очистить"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:27
+msgid "Do not query"
+msgstr "Не запрашивать"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:35
+msgid "WMS Connection URL"
+msgstr "Ссылка WMS-соеденения"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:43
+msgid "URL"
+msgstr "URL"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:51
+msgid "Username"
+msgstr "Имя пользователя"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:61
+msgid "Password"
+msgstr "Пароль"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:71
+msgid "Version"
+msgstr "Версия"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:82
+msgid "Capabilities"
+msgstr "Возможности"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:93
+msgid "Referer header"
+msgstr "Заголовок Referer"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:103
+msgid "Skip SSL/TLS certificate verification"
+msgstr "Не проверять сертификат SSL/TLS"
+
+#: nodepkg/wmsclient-connection/WmsClientConnectionWidget.tsx:112
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:153
+msgid "WMS Connection"
+msgstr "WMS Соединение"
+
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:85
+msgid "Add to Web GIS"
+msgstr "Добавить в Веб ГИС"
+
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:177
+msgid "WMS layers"
+msgstr "Слои WMS"
+
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:186
+msgid "Remote SRS"
+msgstr "Удалённая СК"
+
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:197
+#: nodepkg/wmsclient-layer/component/VendorParamsModal.tsx:65
+msgid "Vendor parameters"
+msgstr "Вендор параметры"
+
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:210
+msgid "Edit vendor parameters"
+msgstr "Изменить вендор параметры"
+
+#: nodepkg/wmsclient-layer/WmsClientLayerWidget.tsx:219
+msgid "WMS Layer"
+msgstr "Слой WMS"
+
+#: nodepkg/wmsclient-layer/component/VendorParamsModal.tsx:21
+msgid "Key"
+msgstr "Ключ"
+
+#: nodepkg/wmsclient-layer/component/VendorParamsModal.tsx:27
+msgid "Value"
+msgstr "Значение"

@@ -1,0 +1,49 @@
+#: nodepkg/editor/EditorWidget.tsx:45
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:29
+msgid "False"
+msgstr "Ложь"
+
+#: nodepkg/editor/EditorWidget.tsx:46
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:29
+msgid "True"
+msgstr "Истина"
+
+#: nodepkg/editor/EditorWidget.tsx:68
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:13
+msgid "String"
+msgstr "Строка"
+
+#: nodepkg/editor/EditorWidget.tsx:69
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:15
+msgid "Number"
+msgstr "Число"
+
+#: nodepkg/editor/EditorWidget.tsx:70
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:17
+msgid "Boolean"
+msgstr "Логический"
+
+#: nodepkg/editor/EditorWidget.tsx:71
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:11
+msgid "Empty"
+msgstr "Пусто"
+
+#: nodepkg/editor/EditorWidget.tsx:82
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:43
+msgid "Key"
+msgstr "Ключ"
+
+#: nodepkg/editor/EditorWidget.tsx:88
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:49
+msgid "Type"
+msgstr "Тип"
+
+#: nodepkg/editor/EditorWidget.tsx:94
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:56
+msgid "Value"
+msgstr "Значение"
+
+#: nodepkg/editor/EditorWidget.tsx:114
+#: nodepkg/resource-section/ResmetaResourceSection.tsx:85
+msgid "Metadata"
+msgstr "Метаданные"

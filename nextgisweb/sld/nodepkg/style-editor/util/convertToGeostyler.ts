@@ -1,0 +1,109 @@
+import type {
+  FillSymbolizer as GSFillSymbolizer,
+  LineSymbolizer as GSLineSymbolizer,
+  MarkSymbolizer as GSMarkSymbolizer,
+  Symbolizer as GSSymbolizer,
+  TextSymbolizer as GSTextSymbolizer,
+  WellKnownName as GSWellKnownName,
+} from "geostyler-style";
+
+import { deepCleanUndefined } from "@nextgisweb/gui/util/deepCleanUndefined";
+import type {
+  LineSymbolizer,
+  PointSymbolizer,
+  PolygonSymbolizer,
+  TextSymbolizer,
+} from "@nextgisweb/sld/type/api";
+
+import type { Symbolizer } from "../type/Style";
+
+function reverseConvertMarkSymbolizer(
+  symbolizer: PointSymbolizer
+): GSMarkSymbolizer {
+  const { graphic } = symbolizer;
+  const { mark, opacity, size } = graphic;
+
+  const wellKnownName: GSWellKnownName = mark?.well_known_name ?? "circle";
+  const markSymbolizer: GSMarkSymbolizer = {
+    kind: "Mark",
+    wellKnownName,
+    opacity,
+    radius: size ? size / 2 : undefined,
+  };
+
+  if (mark) {
+    const { fill, stroke } = mark;
+    markSymbolizer.color = fill?.color;
+    markSymbolizer.fillOpacity = fill?.opacity;
+
+    markSymbolizer.strokeColor = stroke?.color;
+    markSymbolizer.strokeOpacity = stroke?.opacity;
+    markSymbolizer.strokeWidth = stroke?.width;
+  }
+
+  return markSymbolizer;
+}
+
+function reverseConvertLineSymbolizer(
+  symbolizer: LineSymbolizer
+): GSLineSymbolizer {
+  const { stroke } = symbolizer;
+  return {
+    kind: "Line",
+    color: stroke.color,
+    width: stroke.width,
+    opacity: stroke.opacity,
+    dasharray: stroke?.dash_pattern,
+    cap: "butt",
+  };
+}
+
+function reverseConvertFillSymbolizer(
+  symbolizer: PolygonSymbolizer
+): GSFillSymbolizer {
+  const { fill, stroke } = symbolizer;
+  return {
+    kind: "Fill",
+    color: fill?.color,
+    opacity: fill?.opacity,
+    fillOpacity: fill?.opacity,
+    outlineColor: stroke?.color,
+    outlineOpacity: stroke?.opacity,
+    outlineWidth: stroke?.width,
+    outlineDasharray: stroke?.dash_pattern,
+    outlineCap: "butt",
+  };
+}
+
+function reverseConvertTextSymbolizer(
+  symbolizer: TextSymbolizer
+): GSTextSymbolizer {
+  const { fill, field, font_size, placement, halo } = symbolizer;
+  return {
+    kind: "Text",
+    color: fill?.color,
+    haloColor: halo?.fill?.color,
+    haloWidth: halo?.radius,
+    opacity: fill?.opacity,
+    size: font_size,
+    label: field,
+    offset: placement?.offset as [number, number] | undefined,
+  };
+}
+
+export function convertToGeostyler(symbolizer: Symbolizer): GSSymbolizer {
+  switch (symbolizer.type) {
+    case "point":
+      return deepCleanUndefined(reverseConvertMarkSymbolizer(symbolizer));
+    case "line":
+      return deepCleanUndefined(reverseConvertLineSymbolizer(symbolizer));
+    case "polygon":
+      return deepCleanUndefined(reverseConvertFillSymbolizer(symbolizer));
+    case "text":
+      return deepCleanUndefined(reverseConvertTextSymbolizer(symbolizer));
+    default:
+      throw new Error(
+        `Symbolyser converting error: ${symbolizer.type} is not support`
+      );
+  }
+}

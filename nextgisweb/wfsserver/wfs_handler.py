@@ -1,0 +1,1386 @@
+import re
+from datetime import date, datetime, time
+from os import path
+from tempfile import NamedTemporaryFile
+
+from lxml import etree, html
+from lxml.builder import ElementMaker
+from msgspec import UNSET, UnsetType
+from osgeo import ogr
+from pyramid.request import Request
+from shapely.geometry import box
+from sqlalchemy import and_
+from sqlalchemy.exc import NoResultFound
+
+from nextgisweb.lib.datetime import utcnow_naive
+from nextgisweb.lib.geometry import Geometry, GeometryNotValid, Transformer
+from nextgisweb.lib.json import dumps, loads
+from nextgisweb.lib.ows import (
+    FIELD_TYPE_WFS,
+    SRSParseError,
+    get_work_version,
+    parse_request,
+    parse_srs,
+)
+
+from nextgisweb.core.exception import ValidationError
+from nextgisweb.feature_layer import (
+    FIELD_TYPE,
+    GEOM_TYPE,
+    Feature,
+    IFeatureLayer,
+    IVersionableFeatureLayer,
+)
+from nextgisweb.layer import IBboxLayer
+from nextgisweb.resource import DataScope
+from nextgisweb.spatial_ref_sys import SRS
+
+from .model import Layer
+from .util import validate_tag
+
+wfsfld_pattern = re.compile(r"^wfsfld_(\d+)$")
+
+FIELD_TYPE_2_WFS = {
+    FIELD_TYPE.INTEGER: FIELD_TYPE_WFS["XSD_INTEGER"],
+    FIELD_TYPE.BIGINT: FIELD_TYPE_WFS["XSD_LONG"],
+    FIELD_TYPE.REAL: FIELD_TYPE_WFS["XSD_DOUBLE"],
+    FIELD_TYPE.STRING: FIELD_TYPE_WFS["XSD_STRING"],
+    FIELD_TYPE.DATE: FIELD_TYPE_WFS["XSD_DATE"],
+    FIELD_TYPE.TIME: FIELD_TYPE_WFS["XSD_TIME"],
+    FIELD_TYPE.DATETIME: FIELD_TYPE_WFS["XSD_DATETIME"],
+    FIELD_TYPE.BOOLEAN: FIELD_TYPE_WFS["XSD_BOOLEAN"],
+    FIELD_TYPE.JSON: FIELD_TYPE_WFS["XSD_STRING"],
+}
+
+# Spec: http://docs.opengeospatial.org/is/09-025r2/09-025r2.html
+v100 = "1.0.0"
+v110 = "1.1.0"
+v200 = "2.0.0"
+v202 = "2.0.2"
+VERSION_SUPPORTED = (v100, v110, v200, v202)
+
+VERSION_DEFAULT = v202
+
+XSD_DIR = path.join(path.dirname(path.abspath(__file__)), "test/xsd/")
+
+_nsmap = dict(
+    wfs=dict(
+        (
+            (
+                v100,
+                (
+                    "http://www.opengis.net/wfs",
+                    "http://schemas.opengis.net/wfs/1.0.0/WFS-basic.xsd",
+                ),
+            ),
+            (
+                v110,
+                ("http://www.opengis.net/wfs", "http://schemas.opengis.net/wfs/1.1.0/wfs.xsd"),
+            ),
+            (
+                v200,
+                ("http://www.opengis.net/wfs/2.0", "http://schemas.opengis.net/wfs/2.0/wfs.xsd"),
+            ),
+        )
+    ),
+    gml=dict(
+        (
+            (
+                v100,
+                ("http://www.opengis.net/gml", "http://schemas.opengis.net/gml/2.1.2/feature.xsd"),
+            ),
+            (
+                v110,
+                (
+                    "http://www.opengis.net/gml",
+                    "http://schemas.opengis.net/gml/3.1.1/base/feature.xsd",
+                ),
+            ),
+            (
+                v200,
+                (
+                    "http://www.opengis.net/gml/3.2",
+                    "http://schemas.opengis.net/gml/3.2.1/feature.xsd",
+                ),
+            ),
+        )
+    ),
+    ogc=dict(((v100, ("http://www.opengis.net/ogc", None)),)),
+    xsi=dict(((v100, ("http://www.w3.org/2001/XMLSchema-instance", None)),)),
+    ows=dict(
+        (
+            (v110, ("http://www.opengis.net/ows", None)),
+            (v200, ("http://www.opengis.net/ows/1.1", None)),
+        )
+    ),
+    xlink=dict(((v110, ("http://www.w3.org/1999/xlink", None)),)),
+    fes=dict(((v200, ("http://www.opengis.net/fes/2.0", None)),)),
+)
+
+
+def nsmap(prefix, request_version):
+    item = _nsmap[prefix]
+    for version, (ns, loc) in reversed(item.items()):
+        if version <= request_version:
+            return dict(ns=ns, loc=loc)
+    raise ValidationError("Namespace %s not found for version %s." % (prefix, request_version))
+
+
+def ns_attr(ns, attr, request_version):
+    return "{{{0}}}{1}".format(nsmap(ns, request_version)["ns"], attr)
+
+
+def ns_trim(value):
+    pos = max(value.find("}"), value.rfind(":"))
+    return value[pos + 1 :]
+
+
+def El(tag, attrs=None, parent=None, text=None, namespace=None):
+    if namespace is None:
+        e = etree.Element(tag, attrs)
+    else:
+        EM = ElementMaker(namespace=namespace)
+        e = EM(tag, attrs) if attrs is not None else EM(tag)
+    if text is not None:
+        e.text = text
+    if parent is not None:
+        parent.append(e)
+    return e
+
+
+def find_tags(element, tag):
+    return element.xpath('.//*[local-name()="%s"]' % tag)
+
+
+def fid_encode(fid, layer_name):
+    return "%s.%d" % (layer_name, fid)
+
+
+def fid_decode(fid, layer_name):
+    int_pos = len(layer_name) + 1
+    return int(fid[int_pos:])
+
+
+GET_CAPABILITIES = "GetCapabilities"
+DESCRIBE_FEATURE_TYPE = "DescribeFeatureType"
+GET_FEATURE = "GetFeature"
+TRANSACTION = "Transaction"
+
+GEOM_TYPE_TO_GML_TYPE = {
+    GEOM_TYPE.POINT: "gml:PointPropertyType",
+    GEOM_TYPE.LINESTRING: "gml:LineStringPropertyType",
+    GEOM_TYPE.POLYGON: "gml:PolygonPropertyType",
+    GEOM_TYPE.MULTIPOINT: "gml:MultiPointPropertyType",
+    GEOM_TYPE.MULTILINESTRING: "gml:MultiLineStringPropertyType",
+    GEOM_TYPE.MULTIPOLYGON: "gml:MultiPolygonPropertyType",
+    GEOM_TYPE.POINTZ: "gml:PointPropertyType",
+    GEOM_TYPE.LINESTRINGZ: "gml:LineStringPropertyType",
+    GEOM_TYPE.POLYGONZ: "gml:PolygonPropertyType",
+    GEOM_TYPE.MULTIPOINTZ: "gml:MultiPointPropertyType",
+    GEOM_TYPE.MULTILINESTRINGZ: "gml:MultiLineStringPropertyType",
+    GEOM_TYPE.MULTIPOLYGONZ: "gml:MultiPolygonPropertyType",
+}
+
+# Values are feature query operators
+COMPARISON_OPERATORS = {
+    "PropertyIsEqualTo": "eq",
+    "PropertyIsNotEqualTo": "ne",
+    "PropertyIsNil": "isnull",
+    "PropertyIsGreaterThan": "gt",
+    "PropertyIsGreaterThanOrEqualTo": "ge",
+    "PropertyIsLessThan": "lt",
+    "PropertyIsLessThanOrEqualTo": "le",
+}
+
+
+def get_geom_column(feature_layer):
+    return feature_layer.column_geom if hasattr(feature_layer, "column_geom") else "geom"
+
+
+def srs_short_format(srs_id):
+    return "EPSG:%d" % srs_id
+
+
+def srs_ogc_urn_format(srs_id):
+    return "urn:ogc:def:crs:EPSG::%d" % srs_id
+
+
+def geom_from_gml(el):
+    if "srsName" in el.attrib:
+        try:
+            srid, axis_xy = parse_srs(el.attrib["srsName"])
+        except SRSParseError as e:
+            raise ValidationError(str(e))
+    else:
+        srid, axis_xy = None, True
+
+    value = etree.tostring(el).decode()
+    ogr_geom = ogr.CreateGeometryFromGML(value)
+    geom = Geometry.from_ogr(ogr_geom, srid=srid)
+    if not axis_xy:
+        srs = SRS.filter_by(id=srid).one()
+        if srs.is_geographic:
+            return geom.flip_coordinates()
+    return geom
+
+
+def transform(geom, srs_to):
+    try:
+        srs_from = SRS.filter_by(id=geom.srid).one()
+    except NoResultFound:
+        raise ValidationError("SRID (id=%d) not found." % geom.srid)
+    transformer = Transformer(srs_from.wkt, srs_to.wkt)
+    return transformer.transform(geom)
+
+
+class WFSHandler:
+    def __init__(self, resource, request, force_schema_validation=False):
+        self.resource = resource
+        self.request = request
+
+        if self.request.method not in ("GET", "POST"):
+            raise ValidationError("Unsupported request method")
+
+        params, self.root_body = parse_request(request)
+
+        self.p_request = params.get("REQUEST")
+
+        self.p_version = get_work_version(
+            params.get("VERSION"),
+            params.get("ACCEPTVERSIONS"),
+            VERSION_SUPPORTED,
+            VERSION_DEFAULT,
+        )
+        if self.p_version not in VERSION_SUPPORTED:
+            raise ValidationError("Unsupported version")
+
+        self.p_typenames = params.get("TYPENAMES", params.get("TYPENAME"))
+        self.p_propertyname = params.get("PROPERTYNAME")
+        self.p_resulttype = params.get("RESULTTYPE")
+        self.p_bbox = params.get("BBOX")
+        self.p_srsname = params.get("SRSNAME")
+        self.p_count = params.get("COUNT", params.get("MAXFEATURES"))
+        self.p_startindex = params.get("STARTINDEX")
+        self.p_filter = params.get("FILTER")
+
+        self.p_validate_schema = force_schema_validation or (
+            params.get("VALIDATESCHEMA", "FALSE").upper() in ("1", "YES", "TRUE")
+        )
+
+        self.service_namespace = self.request.route_url("wfsserver.wfs", id=self.resource.id)
+
+    @staticmethod
+    def exception_response(request, err_title, err_message):
+        if err_title is not None and err_message is not None:
+            message = "%s: %s" % (err_title, err_message)
+        elif err_message is not None:
+            message = err_message
+        else:
+            message = "Unknown error"
+
+        params, root_body = parse_request(request)
+        version = get_work_version(
+            params.get("VERSION"),
+            params.get("ACCEPTVERSIONS"),
+            VERSION_SUPPORTED,
+            VERSION_DEFAULT,
+        )
+        if version is None:
+            version = VERSION_DEFAULT
+
+        if version >= v200:
+            root = El("ExceptionReport", dict(version=version, xmlns=nsmap("ows", version)["ns"]))
+            _exc = El("Exception", parent=root)
+            El("ExceptionText", parent=_exc, text=message)
+        else:
+            root = El(
+                "ServiceExceptionReport", dict(version="1.2.0", xmlns=nsmap("ogc", version)["ns"])
+            )
+            El("ServiceException", parent=root, text=message)
+
+        return etree.tostring(root, encoding="utf-8")
+
+    @property
+    def title(self):
+        return self.resource.display_name
+
+    @property
+    def abstract(self):
+        return (
+            html.document_fromstring(self.resource.description).text_content()
+            if self.resource.description is not None
+            else ""
+        )
+
+    @property
+    def gml_format(self):
+        return "GML32" if self.p_version >= v200 else "GML2"
+
+    def response(self):
+        if self.p_request == GET_CAPABILITIES:
+            if self.p_version >= v200:
+                root = self._get_capabilities200()
+            elif self.p_version == v110:
+                root = self._get_capabilities110()
+            else:
+                root = self._get_capabilities100()
+        elif self.p_request == DESCRIBE_FEATURE_TYPE:
+            root = self._describe_feature_type()
+        elif self.p_request == GET_FEATURE:
+            root = self._get_feature()
+        elif self.p_request == TRANSACTION:
+            root = self._transaction()
+        else:
+            raise ValidationError("Unsupported request: '%s'." % self.p_request)
+
+        xml = etree.tostring(root, encoding="unicode")
+
+        if self.p_validate_schema:
+            if self.p_request in (GET_CAPABILITIES, TRANSACTION):
+                if self.p_version == v100:
+                    version_dir = "1.0.0"
+                elif self.p_version == v110:
+                    version_dir = "1.1.0"
+                else:
+                    version_dir = "2.0"
+                wfs_schema_dir = path.join(XSD_DIR, "schemas.opengis.net/wfs/")
+                xsd_file = (
+                    "WFS-capabilities.xsd"
+                    if self.p_version == v100 and self.p_request == GET_CAPABILITIES
+                    else "wfs.xsd"
+                )
+                xsd_path = path.join(wfs_schema_dir, version_dir, xsd_file)
+
+                schema = etree.XMLSchema(file=xsd_path)
+                schema.assertValid(etree.XML(xml))
+            elif self.p_request == DESCRIBE_FEATURE_TYPE:
+                xsd_path = path.join(XSD_DIR, "www.w3.org/2009/XMLSchema/XMLSchema.xsd")
+
+                schema = etree.XMLSchema(file=xsd_path)
+                schema.assertValid(etree.XML(xml))
+            elif self.p_request == GET_FEATURE:
+                describe_path = self.request.route_path(
+                    "wfsserver.wfs",
+                    id=self.resource.id,
+                    _query=dict(
+                        REQUEST=DESCRIBE_FEATURE_TYPE,
+                        SERVICE="WFS",
+                        VERSION=self.p_version,
+                        TYPENAME=self.p_typenames,
+                    ),
+                )
+                subreq = Request.blank(describe_path)
+                subreq.headers = self.request.headers
+                resp = self.request.invoke_subrequest(subreq)
+                describe_root = etree.XML(resp.body)
+
+                opengis_url = "http://schemas.opengis.net"
+                opengis_dir = path.join(XSD_DIR, "schemas.opengis.net")
+                for el in describe_root.xpath(
+                    ".//*[starts-with(@schemaLocation, '%s')]" % opengis_url
+                ):
+                    el.attrib["schemaLocation"] = el.attrib["schemaLocation"].replace(
+                        opengis_url, opengis_dir
+                    )
+
+                with NamedTemporaryFile() as tmp:
+                    tmp.write(etree.tostring(describe_root))
+                    tmp.flush()
+
+                    _schema = El(
+                        "schema",
+                        dict(elementFormDefault="qualified"),
+                        namespace="http://www.w3.org/2001/XMLSchema",
+                    )
+                    El(
+                        "import",
+                        dict(namespace=self.service_namespace, schemaLocation=tmp.name),
+                        parent=_schema,
+                        namespace="http://www.w3.org/2001/XMLSchema",
+                    )
+
+                    schema = etree.XMLSchema(etree=_schema)
+                    schema.assertValid(etree.XML(xml))
+            else:
+                raise ValidationError(
+                    "Schema validation isn't supported for {} request".format(self.p_request)
+                )
+
+        return xml
+
+    def _feature_type_list(self, parent):
+        __list = El("FeatureTypeList")
+        if self.p_version < v200:
+            __ops = El("Operations", parent=__list)
+            if self.p_version == v110:
+                El("Operation", text="Query", parent=__ops)
+            else:
+                El("Query", parent=__ops)
+
+        EM_name = ElementMaker(nsmap=dict(ngw=self.service_namespace))
+        layer_count = 0
+        for layer in self.resource.layers:
+            feature_layer = layer.resource
+            if not feature_layer.has_permission(DataScope.read, self.request.user):
+                continue
+            __type = El("FeatureType", parent=__list)
+            __name = EM_name("Name")
+            __name.text = layer.keyname
+            __type.append(__name)
+            El("Title", parent=__type, text=layer.display_name)
+            El("Abstract", parent=__type)
+
+            if self.p_version >= v200:
+                srs_tag = "DefaultCRS"
+            elif self.p_version == v110:
+                srs_tag = "DefaultSRS"
+            else:
+                srs_tag = "SRS"
+            El(srs_tag, parent=__type, text=srs_short_format(layer.resource.srs_id))
+
+            if self.p_version >= v110:
+                for srs in SRS.filter(
+                    and_(SRS.auth_name == "EPSG", SRS.id != layer.resource.srs_id)
+                ).all():
+                    other_srs_tag = "OtherCRS" if self.p_version >= v200 else "OtherSRS"
+                    El(other_srs_tag, parent=__type, text=srs_short_format(srs.id))
+
+            if self.p_version == v100:
+                __ops = El("Operations", parent=__type)
+                if feature_layer.has_permission(DataScope.write, self.request.user):
+                    El("Insert", parent=__ops)
+                    El("Update", parent=__ops)
+                    El("Delete", parent=__ops)
+
+            if IBboxLayer.providedBy(feature_layer):
+                extent = feature_layer.extent
+                if None not in extent.values():
+                    if self.p_version >= v110:
+                        _ns_ows = nsmap("ows", self.p_version)["ns"]
+                        __bbox = El("WGS84BoundingBox", namespace=_ns_ows, parent=__type)
+                        El(
+                            "LowerCorner",
+                            namespace=_ns_ows,
+                            parent=__bbox,
+                            text="%.6f %.6f" % (extent["minLon"], extent["minLat"]),
+                        )
+                        El(
+                            "UpperCorner",
+                            namespace=_ns_ows,
+                            parent=__bbox,
+                            text="%.6f %.6f" % (extent["maxLon"], extent["maxLat"]),
+                        )
+                    else:
+                        bbox = dict(
+                            maxx=str(extent["maxLon"]),
+                            maxy=str(extent["maxLat"]),
+                            minx=str(extent["minLon"]),
+                            miny=str(extent["minLat"]),
+                        )
+                        El("LatLongBoundingBox", bbox, parent=__type)
+            layer_count += 1
+        if layer_count > 0:
+            parent.append(__list)
+
+    def _parse_filter(self, __filter, layer):
+        filter_result = dict(fids=list(), intersects=None, filter=list())
+        next_target = [(__filter, 0)]
+        while len(next_target) > 0:
+            __parent, start_index = next_target.pop()
+            for i in range(start_index, len(__parent)):
+                __el = __parent[i]
+                tag = ns_trim(__el.tag)
+                if tag == "And":
+                    next_target.append((__parent, i + 1))
+                    next_target.append((__el, 0))
+                    break
+
+                if tag == "ResourceId":  # 2.0.0
+                    resid_attr = "rid"
+                elif tag == "GmlObjectId":  # 1.1.0
+                    resid_attr = ns_attr("gml", "id", self.p_version)
+                elif tag == "FeatureId":  # 1.0.0 and 1.1.0
+                    resid_attr = "fid"
+                else:
+                    resid_attr = None
+                if resid_attr is not None:
+                    fid = __el.get(resid_attr)
+                    filter_result["fids"].append(fid_decode(fid, layer.keyname))
+                    continue
+
+                if tag in ("BBOX", "Intersects"):
+                    if filter_result["intersects"] is not None:
+                        raise ValidationError("%s parameter conflict." % tag)
+                    __value_reference = __el[0]
+                    if ns_trim(__value_reference.tag) != "ValueReference":
+                        raise ValidationError("%s parse: ValueReference required." % tag)
+                    elif __value_reference.text != get_geom_column(layer.resource):
+                        raise ValidationError(
+                            "Geometry column '%s' not found." % __value_reference.text
+                        )
+                    __gml = __el[1]
+                    try:
+                        filter_result["intersects"] = geom_from_gml(__gml)
+                    except GeometryNotValid:
+                        raise ValidationError("%s parse: geometry is not valid." % tag)
+                    continue
+
+                if tag in COMPARISON_OPERATORS.keys():
+                    op = COMPARISON_OPERATORS[tag]
+
+                    __value_reference = __el[0]
+                    if ns_trim(__value_reference.tag) != "ValueReference":
+                        raise ValidationError("%s parse: ValueReference required." % tag)
+                    k = __value_reference.text
+
+                    if tag == "PropertyIsNil":
+                        v = "yes"
+                    else:
+                        __literal = __el[1]
+                        if ns_trim(__literal.tag) != "Literal":
+                            raise ValidationError("%s parse: Literal required." % tag)
+                        v = __literal.text
+
+                    filter_result["filter"].append((k, op, v))
+                    continue
+
+                raise ValidationError("Filter element '%s' is not supported." % __el.tag)
+        return filter_result
+
+    def _get_capabilities100(self):
+        EM = ElementMaker(nsmap=dict(ogc=nsmap("ogc", self.p_version)["ns"]))
+        root = EM(
+            "WFS_Capabilities",
+            dict(version=self.p_version, xmlns=nsmap("wfs", self.p_version)["ns"]),
+        )
+
+        wfs_url = self.request.route_url("wfsserver.wfs", id=self.resource.id)
+
+        # Service
+        __s = El("Service", parent=root)
+        El("Name", parent=__s, text=self.resource.keyname or "WFS")
+        El("Title", parent=__s, text=self.title)
+        El("Abstract", parent=__s, text=self.abstract)
+        El("OnlineResource", text=wfs_url, parent=__s)
+
+        # Operations
+        __c = El("Capability", parent=root)
+        __r = El("Request", parent=__c)
+
+        for wfs_operation in (
+            GET_CAPABILITIES,
+            DESCRIBE_FEATURE_TYPE,
+            GET_FEATURE,
+            TRANSACTION,
+        ):
+            __wfs_op = El(wfs_operation, parent=__r)
+            if wfs_operation == DESCRIBE_FEATURE_TYPE:
+                __lang = El("SchemaDescriptionLanguage", parent=__wfs_op)
+                El("XMLSCHEMA", parent=__lang)
+            if wfs_operation == GET_FEATURE:
+                __format = El("ResultFormat", parent=__wfs_op)
+                El(self.gml_format, parent=__format)
+
+            __dcp = El("DCPType", parent=__wfs_op)
+            __http = El("HTTP", parent=__dcp)
+            for request_method in ("Get", "Post"):
+                if wfs_operation == TRANSACTION and request_method != "Post":
+                    continue
+                El(request_method, dict(onlineResource=wfs_url), parent=__http)
+
+        # FeatureTypeList
+        self._feature_type_list(root)
+
+        # Filter_Capabilities
+        _ns_ogc = nsmap("ogc", self.p_version)["ns"]
+        __filter = El("Filter_Capabilities", namespace=_ns_ogc, parent=root)
+
+        __sc = El("Spatial_Capabilities", namespace=_ns_ogc, parent=__filter)
+        __so = El("Spatial_Operators", namespace=_ns_ogc, parent=__sc)
+        El("BBOX", namespace=_ns_ogc, parent=__so)
+
+        __sc = El("Scalar_Capabilities", namespace=_ns_ogc, parent=__filter)
+        El("Logical_Operators", namespace=_ns_ogc, parent=__sc)
+
+        return root
+
+    def _get_capabilities110(self):
+        _ns_ows = nsmap("ows", self.p_version)["ns"]
+        _ns_ogc = nsmap("ogc", self.p_version)["ns"]
+
+        EM = ElementMaker(
+            nsmap=dict(
+                ows=_ns_ows,
+                xlink=nsmap("xlink", self.p_version)["ns"],
+                gml=nsmap("gml", self.p_version)["ns"],
+            )
+        )
+        root = EM(
+            "WFS_Capabilities",
+            dict(version=self.p_version, xmlns=nsmap("wfs", self.p_version)["ns"]),
+        )
+
+        # Service
+        __service = El("ServiceIdentification", namespace=_ns_ows, parent=root)
+        El("Title", namespace=_ns_ows, parent=__service, text=self.title)
+        El("Abstract", namespace=_ns_ows, parent=__service, text=self.abstract)
+        El("ServiceType", namespace=_ns_ows, parent=__service, text="WFS")
+        for version in VERSION_SUPPORTED:
+            El("ServiceTypeVersion", namespace=_ns_ows, parent=__service, text=version)
+
+        # Operations
+        __op_md = El("OperationsMetadata", namespace=_ns_ows, parent=root)
+
+        wfs_url = self.request.route_url("wfsserver.wfs", id=self.resource.id)
+        for wfs_operation in (
+            GET_CAPABILITIES,
+            DESCRIBE_FEATURE_TYPE,
+            GET_FEATURE,
+            TRANSACTION,
+        ):
+            __wfs_op = El("Operation", dict(name=wfs_operation), namespace=_ns_ows, parent=__op_md)
+            req_methods = ("Get", "Post") if wfs_operation != TRANSACTION else ("Post",)
+            __dcp = El("DCP", namespace=_ns_ows, parent=__wfs_op)
+            __http = El("HTTP", namespace=_ns_ows, parent=__dcp)
+            for req_mehtod in req_methods:
+                El(
+                    req_mehtod,
+                    {
+                        ns_attr("xlink", "href", self.p_version): wfs_url + "?"
+                        if req_mehtod == "Get"
+                        else wfs_url
+                    },
+                    namespace=_ns_ows,
+                    parent=__http,
+                )
+            if wfs_operation in (DESCRIBE_FEATURE_TYPE, GET_FEATURE):
+                __parameter = El(
+                    "Parameter", dict(name="OutputFormat"), namespace=_ns_ows, parent=__wfs_op
+                )
+                El(
+                    "Value",
+                    text="text/xml; subtype=gml/2.1.2",
+                    namespace=_ns_ows,
+                    parent=__parameter,
+                )
+
+        __parameter = El(
+            "Parameter", dict(name="AcceptVersions"), namespace=_ns_ows, parent=__op_md
+        )
+        for version in VERSION_SUPPORTED:
+            El("Value", text=version, namespace=_ns_ows, parent=__parameter)
+
+        # FeatureTypeList
+        self._feature_type_list(root)
+
+        # Filter_Capabilities
+        __filter = El("Filter_Capabilities", namespace=_ns_ogc, parent=root)
+
+        __sc = El("Spatial_Capabilities", namespace=_ns_ogc, parent=__filter)
+
+        __go = El("GeometryOperands", namespace=_ns_ogc, parent=__sc)
+        for operand in ("gml:Envelope", "gml:Point", "gml:LineString", "gml:Polygon"):
+            El("GeometryOperand", text=operand, namespace=_ns_ogc, parent=__go)
+
+        __so = El("SpatialOperators", namespace=_ns_ogc, parent=__sc)
+        El("SpatialOperator", dict(name="BBOX"), namespace=_ns_ogc, parent=__so)
+
+        __sc = El("Scalar_Capabilities", namespace=_ns_ogc, parent=__filter)
+        El("LogicalOperators", namespace=_ns_ogc, parent=__sc)
+
+        __id = El("Id_Capabilities", namespace=_ns_ogc, parent=__filter)
+        El("FID", namespace=_ns_ogc, parent=__id)
+
+        return root
+
+    def _get_capabilities200(self):
+        _ns_ows = nsmap("ows", self.p_version)["ns"]
+        _ns_fes = nsmap("fes", self.p_version)["ns"]
+        _ns_gml = nsmap("gml", self.p_version)["ns"]
+
+        EM = ElementMaker(
+            nsmap=dict(
+                fes=_ns_fes, ows=_ns_ows, gml=_ns_gml, xlink=nsmap("xlink", self.p_version)["ns"]
+            )
+        )
+        root = EM(
+            "WFS_Capabilities",
+            dict(version=self.p_version, xmlns=nsmap("wfs", self.p_version)["ns"]),
+        )
+
+        # Service
+        __service = El("ServiceIdentification", namespace=_ns_ows, parent=root)
+        El("Title", namespace=_ns_ows, parent=__service, text=self.title)
+        El("Abstract", namespace=_ns_ows, parent=__service, text=self.abstract)
+        El("ServiceType", namespace=_ns_ows, parent=__service, text="WFS")
+        for version in reversed(VERSION_SUPPORTED):
+            El("ServiceTypeVersion", namespace=_ns_ows, parent=__service, text=version)
+
+        # Operations
+        __op_md = El("OperationsMetadata", namespace=_ns_ows, parent=root)
+
+        wfs_url = self.request.route_url("wfsserver.wfs", id=self.resource.id) + "?"
+        for wfs_operation in (
+            GET_CAPABILITIES,
+            DESCRIBE_FEATURE_TYPE,
+            GET_FEATURE,
+            TRANSACTION,
+        ):
+            __wfs_op = El("Operation", dict(name=wfs_operation), namespace=_ns_ows, parent=__op_md)
+            req_methods = ("Get", "Post") if wfs_operation != TRANSACTION else ("Post",)
+            __dcp = El("DCP", namespace=_ns_ows, parent=__wfs_op)
+            __http = El("HTTP", namespace=_ns_ows, parent=__dcp)
+            for req_mehtod in req_methods:
+                El(
+                    req_mehtod,
+                    {ns_attr("xlink", "href", self.p_version): wfs_url},
+                    namespace=_ns_ows,
+                    parent=__http,
+                )
+            if wfs_operation in (DESCRIBE_FEATURE_TYPE, GET_FEATURE):
+                __parameter = El(
+                    "Parameter", dict(name="OutputFormat"), namespace=_ns_ows, parent=__wfs_op
+                )
+                __values = El("AllowedValues", namespace=_ns_ows, parent=__parameter)
+                El(
+                    "Value",
+                    text="application/gml+xml;version=3.2",
+                    namespace=_ns_ows,
+                    parent=__values,
+                )
+
+        __parameter = El("Parameter", dict(name="version"), namespace=_ns_ows, parent=__op_md)
+        __values = El("AllowedValues", namespace=_ns_ows, parent=__parameter)
+        for version in VERSION_SUPPORTED:
+            El("Value", text=version, namespace=_ns_ows, parent=__values)
+
+        # FeatureTypeList
+        self._feature_type_list(root)
+
+        # Filter_Capabilities
+        __filter = El("Filter_Capabilities", namespace=_ns_fes, parent=root)
+
+        __conf = El("Conformance", namespace=_ns_fes, parent=__filter)
+
+        def constraint(name, default):
+            __constraint = El("Constraint", dict(name=name), namespace=_ns_fes, parent=__conf)
+            El("NoValues", namespace=_ns_ows, parent=__constraint)
+            El("DefaultValue", namespace=_ns_ows, parent=__constraint, text=default)
+
+        constraint("ImplementsTransactionalWFS", "TRUE")
+        constraint("ImplementsQuery", "FALSE")
+        constraint("ImplementsAdHocQuery", "FALSE")
+        constraint("ImplementsFunctions", "FALSE")
+        constraint("ImplementsMinStandardFilter", "FALSE")
+        constraint("ImplementsStandardFilter", "FALSE")
+        constraint("ImplementsMinSpatialFilter", "FALSE")
+        constraint("ImplementsSpatialFilter", "FALSE")
+        constraint("ImplementsMinTemporalFilter", "FALSE")
+        constraint("ImplementsTemporalFilter", "FALSE")
+        constraint("ImplementsVersionNav", "FALSE")
+        constraint("ImplementsSorting", "FALSE")
+        constraint("ImplementsExtendedOperators", "FALSE")
+
+        __sc = El("Spatial_Capabilities", namespace=_ns_fes, parent=__filter)
+
+        __go = El("GeometryOperands", namespace=_ns_fes, parent=__sc)
+        for operand in ("gml:Envelope", "gml:Point", "gml:LineString", "gml:Polygon"):
+            El("GeometryOperand", dict(name=operand), namespace=_ns_fes, parent=__go)
+
+        __so = El("SpatialOperators", namespace=_ns_fes, parent=__sc)
+        El("SpatialOperator", dict(name="BBOX"), namespace=_ns_fes, parent=__so)
+
+        return root
+
+    def _field_key_encode(self, field):
+        k = field.keyname
+        if validate_tag(k) and not wfsfld_pattern.match(k):
+            return k
+        return "wfsfld_%d" % field.id
+
+    def _field_key_decode(self, value, fields):
+        match = wfsfld_pattern.match(value)
+        if match is not None:
+            fld_id = int(match[1])
+            for field in fields:
+                if field.id == fld_id:
+                    return field.keyname
+            raise ValidationError("Field (id=%d) not found." % fld_id)
+        return value
+
+    def _describe_feature_type(self):
+        gml = nsmap("gml", self.p_version)
+        wfs = nsmap("wfs", self.p_version)
+
+        EM = ElementMaker(nsmap=dict(gml=gml["ns"], ngw=self.service_namespace))
+        root = EM(
+            "schema",
+            dict(
+                targetNamespace=self.service_namespace,
+                elementFormDefault="qualified",
+                attributeFormDefault="unqualified",
+                version="0.1",
+                xmlns="http://www.w3.org/2001/XMLSchema",
+            ),
+        )
+
+        El("import", dict(namespace=gml["ns"], schemaLocation=gml["loc"]), parent=root)
+        El("import", dict(namespace=wfs["ns"], schemaLocation=wfs["loc"]), parent=root)
+
+        if self.request.method == "GET":
+            typenames = None if self.p_typenames is None else self.p_typenames.split(",")
+        elif self.request.method == "POST":
+            __typenames = find_tags(self.root_body, "TypeName")
+            typenames = (
+                None if len(__typenames) == 0 else [__typename.text for __typename in __typenames]
+            )
+
+        if typenames is None:
+            typenames = [layer.keyname for layer in self.resource.layers]
+        else:
+            typenames = [ns_trim(tn) for tn in typenames]
+
+        for typename in typenames:
+            substitutionGroup = "gml:AbstractFeature" if self.p_version >= v200 else "gml:_Feature"
+            El(
+                "element",
+                dict(
+                    name=typename,
+                    substitutionGroup=substitutionGroup,
+                    type="ngw:%s_Type" % typename,
+                ),
+                parent=root,
+            )
+
+        for typename in typenames:
+            try:
+                layer = Layer.filter_by(service_id=self.resource.id, keyname=typename).one()
+            except NoResultFound:
+                raise ValidationError("Unknown layer: %s." % typename)
+            feature_layer = layer.resource
+            __ctype = El("complexType", dict(name="%s_Type" % typename), parent=root)
+            __ccontent = El("complexContent", parent=__ctype)
+            __ext = El("extension", dict(base="gml:AbstractFeatureType"), parent=__ccontent)
+            __seq = El("sequence", parent=__ext)
+
+            if feature_layer.geometry_type not in GEOM_TYPE_TO_GML_TYPE:
+                raise ValidationError(
+                    "Geometry type not supported: %s" % feature_layer.geometry_type
+                )
+            El(
+                "element",
+                dict(
+                    minOccurs="0",
+                    name="geom",
+                    type=GEOM_TYPE_TO_GML_TYPE[feature_layer.geometry_type],
+                    nillable="true",
+                ),
+                parent=__seq,
+            )
+
+            for field in feature_layer.fields:
+                if field.datatype not in FIELD_TYPE_2_WFS:
+                    raise ValidationError("Unknown data type: %s" % field.datatype)
+                _ns, _type = FIELD_TYPE_2_WFS[field.datatype]
+                # Ignore namespace, support XSD types only
+                El(
+                    "element",
+                    dict(
+                        minOccurs="0",
+                        name=self._field_key_encode(field),
+                        type=_type,
+                        nillable="true",
+                    ),
+                    parent=__seq,
+                )
+
+        return root
+
+    def _get_feature(self):
+        wfs = nsmap("wfs", self.p_version)
+        gml = nsmap("gml", self.p_version)
+
+        __query = None
+
+        if self.request.method == "POST":
+            __queries = find_tags(self.root_body, "Query")
+            if len(__queries) > 1:
+                raise ValidationError("Multiple queries not supported.")
+            __query = __queries[0]
+            for k, v in __query.attrib.items():
+                if self.p_typenames is None and k.upper() in ("TYPENAME", "TYPENAMES"):
+                    self.p_typenames = v
+                if self.p_srsname is None and k.upper() == "SRSNAME":
+                    self.p_srsname = v
+
+        if self.p_typenames is None:
+            raise ValidationError("Parameter TYPENAMES must be specified.")
+        else:
+            self.p_typenames = ns_trim(self.p_typenames)
+
+        try:
+            layer = Layer.filter_by(service_id=self.resource.id, keyname=self.p_typenames).one()
+        except NoResultFound:
+            raise ValidationError("Unknown layer: %s." % self.p_typenames)
+        feature_layer = layer.resource
+        self.request.resource_permission(DataScope.read, feature_layer)
+
+        geom_column = get_geom_column(feature_layer)
+
+        EM = ElementMaker(
+            namespace=wfs["ns"],
+            nsmap=dict(
+                gml=gml["ns"],
+                wfs=wfs["ns"],
+                ngw=self.service_namespace,
+                ogc=nsmap("ogc", self.p_version)["ns"],
+                xsi=nsmap("xsi", self.p_version)["ns"],
+            ),
+        )
+        describe_location = self.request.route_url(
+            "wfsserver.wfs",
+            id=self.resource.id,
+            _query=dict(
+                REQUEST=DESCRIBE_FEATURE_TYPE,
+                SERVICE="WFS",
+                VERSION=self.p_version,
+                TYPENAME=self.p_typenames,
+            ),
+        )
+        schema_location = " ".join(
+            (
+                wfs["ns"],
+                wfs["loc"],
+                gml["ns"],
+                gml["loc"],
+                self.service_namespace,
+                describe_location,
+            )
+        )
+        root = EM(
+            "FeatureCollection",
+            {
+                "xmlns": self.service_namespace,
+                ns_attr("xsi", "schemaLocation", self.p_version): schema_location,
+            },
+        )
+
+        query = feature_layer.feature_query()
+
+        if self.p_bbox is not None:
+            bbox_param = self.p_bbox.split(",")
+            box_coords = map(float, bbox_param[:4])
+
+            if len(bbox_param) == 5:
+                try:
+                    box_srid, _ = parse_srs(bbox_param[4])
+                except SRSParseError as e:
+                    raise ValidationError(str(e))
+            else:
+                box_srid = feature_layer.srs_id
+
+            try:
+                box_geom = Geometry.from_shape(box(*box_coords), srid=box_srid, validate=True)
+                # if not box_axis_xy and SRS.filter_by(id=box_srid).one().is_geographic:
+                #   It seems that QGIS is always passes lat/lon BBOX for geographical SRS
+                #   TODO: handle QGIS fix versions
+                if SRS.filter_by(id=box_srid).one().is_geographic:
+                    box_geom = box_geom.flip_coordinates()
+            except GeometryNotValid:
+                raise ValidationError("Paremeter BBOX geometry is not valid.")
+            query.intersects(box_geom)
+
+        __filters = []
+        if __query is not None:
+            __filters.extend(find_tags(__query, "Filter"))
+        if self.p_filter is not None:
+            __filters.append(etree.fromstring(self.p_filter))
+
+        if len(__filters) == 1:
+            result = self._parse_filter(__filters[0], layer)
+            if len(result["fids"]) > 0:
+                query.filter(("id", "in", ",".join((str(fid) for fid in result["fids"]))))
+            if result["intersects"] is not None:
+                if self.p_bbox is not None:
+                    raise ValidationError("Parameters conflict: BBOX, Intersects")
+                query.intersects(result["intersects"])
+            if len(result["filter"]) > 0:
+                query.filter(*result["filter"])
+        elif len(__filters) > 1:
+            raise ValidationError("Multiple filters not supported.")
+
+        if self.p_propertyname is not None:
+            self.p_propertyname = [ns_trim(v) for v in self.p_propertyname.split(",")]
+            query.fields(*self.p_propertyname)
+        elif __query is not None:
+            __propertynames = find_tags(__query, "PropertyName")
+            if len(__propertynames) > 0:
+                self.p_propertyname = [ns_trim(el.text) for el in __propertynames]
+                query.fields(*self.p_propertyname)
+
+        limit = int(self.p_count) if self.p_count is not None else layer.maxfeatures
+        if limit is not None:
+            offset = 0 if self.p_startindex is None else int(self.p_startindex)
+            query.limit(limit, offset)
+
+        if self.p_resulttype == "hits":
+            count = query().total_count
+        else:
+            count = 0
+
+            if self.p_propertyname is None or geom_column in self.p_propertyname:
+                query.geom()
+
+            if self.p_srsname is not None:
+                try:
+                    # Ignore axis_xy, return X/Y always
+                    srs_id, axis_xy = parse_srs(self.p_srsname)
+                except SRSParseError as e:
+                    raise ValidationError(str(e))
+
+                srs_out = (
+                    feature_layer.srs
+                    if srs_id == feature_layer.srs_id
+                    else SRS.filter_by(id=srs_id).one()
+                )
+            else:
+                srs_out = feature_layer.srs
+            query.srs(srs_out)
+
+            osr_out = srs_out.to_osr()
+
+            __boundedBy = El(
+                "boundedBy",
+                parent=root,
+                namespace=wfs["ns"] if self.p_version >= v200 else gml["ns"],
+            )
+            minX = maxX = minY = maxY = None
+            gml_parser = etree.XMLParser(huge_tree=True)
+
+            for feature in query():
+                feature_id = fid_encode(feature.id, layer.keyname)
+                __member = (
+                    El("member", parent=root, namespace=wfs["ns"])
+                    if self.p_version >= v200
+                    else El("featureMember", parent=root, namespace=gml["ns"])
+                )
+                id_attr = ns_attr("gml", "id", self.p_version) if self.p_version >= v110 else "fid"
+                __feature = El(layer.keyname, {id_attr: feature_id}, parent=__member)
+
+                if (geom := feature.geom) is not UNSET:
+                    __geom = El("geom", parent=__feature)
+                    if geom is not None:
+                        geom = feature.geom.ogr
+                        geom.AssignSpatialReference(osr_out)
+
+                        _minX, _maxX, _minY, _maxY = geom.GetEnvelope()
+                        minX = _minX if minX is None else min(minX, _minX)
+                        minY = _minY if minY is None else min(minY, _minY)
+                        maxX = _maxX if maxX is None else max(maxX, _maxX)
+                        maxY = _maxY if maxY is None else max(maxY, _maxY)
+
+                        geom_gml = geom.ExportToGML(
+                            [
+                                "FORMAT=%s" % self.gml_format,
+                                "NAMESPACE_DECL=YES",
+                                "SRSNAME_FORMAT=SHORT",
+                                "GMLID=geom-%s" % feature_id,
+                            ]
+                        )
+                        __gml = etree.fromstring(geom_gml, parser=gml_parser)
+                        __geom.append(__gml)
+                    else:
+                        __geom.set(ns_attr("xsi", "nil", self.p_version), "true")
+
+                for field in feature_layer.fields:
+                    if field.keyname not in feature.fields:
+                        continue
+                    __field = El(self._field_key_encode(field), parent=__feature)
+                    value = feature.fields[field.keyname]
+                    if value is not None:
+                        if isinstance(value, datetime):
+                            value = value.isoformat()
+                        elif isinstance(value, bool):
+                            value = "true" if value else "false"
+                        elif isinstance(value, (dict, list)):
+                            value = dumps(value)
+                        elif not isinstance(value, str):
+                            value = str(value)
+                        __field.text = value
+                    else:
+                        __field.set(ns_attr("xsi", "nil", self.p_version), "true")
+
+                count += 1
+
+            if None in (minX, minY, maxX, maxY):
+                El(
+                    "Null" if self.gml_format == "GML32" else "null",
+                    parent=__boundedBy,
+                    namespace=gml["ns"],
+                    text="unknown",
+                )
+            elif self.p_version >= v110:
+                _envelope = El(
+                    "Envelope",
+                    dict(srsName=srs_short_format(srs_out.id)),
+                    parent=__boundedBy,
+                    namespace=gml["ns"],
+                )
+                El(
+                    "lowerCorner",
+                    parent=_envelope,
+                    namespace=gml["ns"],
+                    text="%f %f" % (minX, minY),
+                )
+                El(
+                    "upperCorner",
+                    parent=_envelope,
+                    namespace=gml["ns"],
+                    text="%f %f" % (maxX, maxY),
+                )
+            else:
+                _box = El(
+                    "Box",
+                    dict(srsName=srs_short_format(srs_out.id)),
+                    parent=__boundedBy,
+                    namespace=gml["ns"],
+                )
+                El(
+                    "coordinates",
+                    parent=_box,
+                    namespace=gml["ns"],
+                    text="%f %f %f %f" % (minX, minY, maxX, maxY),
+                )
+
+        if self.p_version == v110:
+            root.set("numberOfFeatures", str(count))
+        elif self.p_version >= v200:
+            # https://mapserver.org/development/rfc/ms-rfc-105.html#getfeature-operation
+            root.set("numberMatched", str(count) if limit is None else "unknown")
+            root.set("numberReturned", "0" if self.p_resulttype == "hits" else str(count))
+
+        if self.p_version >= v110:
+            root.set("timeStamp", utcnow_naive().strftime("%Y-%m-%dT%H:%M:%S.%f"))
+
+        return root
+
+    def _transaction(self):
+        _ns_wfs = nsmap("wfs", self.p_version)["ns"]
+        _ns_ogc = nsmap("ogc", self.p_version)["ns"]
+        if self.p_version >= v200:
+            _ns_fes = nsmap("fes", self.p_version)["ns"]
+
+        layers = dict()
+
+        def find_layer(keyname):
+            if keyname not in layers:
+                try:
+                    layer = Layer.filter_by(service_id=self.resource.id, keyname=keyname).one()
+                except NoResultFound:
+                    raise ValidationError("Unknown layer: %s." % keyname)
+                self.request.resource_permission(DataScope.write, layer.resource)
+                layers[keyname] = layer
+            return layers[keyname]
+
+        EM = ElementMaker(
+            namespace=_ns_wfs,
+            nsmap=dict(wfs=_ns_wfs, ogc=_ns_ogc, xsi=nsmap("xsi", self.p_version)["ns"]),
+        )
+        _response = EM(
+            "WFS_TransactionResponse" if self.p_version == v100 else "TransactionResponse",
+            dict(version=self.p_version),
+        )
+
+        show_summary = self.p_version >= v110
+
+        if show_summary:
+            _summary = El("TransactionSummary", namespace=_ns_wfs, parent=_response)
+            summary = dict(totalInserted=0, totalUpdated=0, totalDeleted=0)
+
+        fversioning_flayers = set()
+
+        try:
+            for _operation in self.root_body:
+                operation = ns_trim(_operation.tag)
+                if operation not in ("Insert", "Update", "Delete"):
+                    raise ValidationError("Unknown operation: %s" % operation)
+
+                keyname = ns_trim(
+                    _operation[0].tag if operation == "Insert" else _operation.get("typeName")
+                )
+                layer = find_layer(keyname)
+                feature_layer = layer.resource
+                geom_column = get_geom_column(feature_layer)
+
+                if (
+                    IVersionableFeatureLayer.providedBy(feature_layer)
+                    and feature_layer.fversioning
+                    and feature_layer not in fversioning_flayers
+                ):
+                    feature_layer.fversioning_open(self.request)
+                    fversioning_flayers.add(feature_layer)
+
+                if operation == "Insert":
+                    feature = Feature()
+
+                    field_data = dict()
+                    geom_data = None
+
+                    for _property in _operation[0]:
+                        key = ns_trim(_property.tag)
+                        fld_keyname = self._field_key_decode(key, feature_layer.fields)
+                        if fld_keyname == geom_column:
+                            geom_data = _property[0]
+                        else:
+                            field_data[fld_keyname] = _property.text
+
+                    set_feature_data(feature, field_data, geom_data, feature_layer)
+
+                    fid = feature_layer.feature_create(feature)
+                    fid_str = fid_encode(fid, keyname)
+
+                    _insert = El(
+                        "InsertResult" if self.p_version == v100 else "InsertResults",
+                        namespace=_ns_wfs,
+                        parent=_response,
+                    )
+                    if self.p_version >= v200:
+                        _feature = El("Feature", namespace=_ns_wfs, parent=_insert)
+                        El("ResourceId", dict(rid=fid_str), namespace=_ns_fes, parent=_feature)
+                    elif self.p_version == v110:
+                        _feature = El("Feature", namespace=_ns_wfs, parent=_insert)
+                        El("FeatureId", dict(fid=fid_str), namespace=_ns_ogc, parent=_feature)
+                    else:
+                        El("FeatureId", dict(fid=fid_str), namespace=_ns_ogc, parent=_insert)
+
+                    if show_summary:
+                        summary["totalInserted"] += 1
+                else:
+                    _filter = find_tags(_operation, "Filter")[0]
+                    result = self._parse_filter(_filter, layer)
+                    if result["intersects"] is not None or len(result["filter"]) != 0:
+                        raise ValidationError(
+                            "Only feature ID filter is supported in transaction."
+                        )
+                    fids = result["fids"]
+                    if len(fids) == 0:
+                        raise ValidationError("Feature ID filter must be specified.")
+
+                    if operation == "Update":
+                        if len(fids) != 1:
+                            raise ValidationError(
+                                "Multiple features not supported in update transaction"
+                            )
+                        query = feature_layer.feature_query()
+                        query.filter_by(id=fids[0])
+
+                        feature = query().one()
+
+                        field_data = dict()
+                        geom_data = UNSET
+
+                        for _property in find_tags(_operation, "Property"):
+                            # NB: GDAL sends Name instead of ValueReference for 2.0 version
+                            _keys = find_tags(_property, "ValueReference")
+                            if len(_keys) == 0:
+                                _keys = find_tags(_property, "Name")
+                            _key = _keys[0]
+                            fld_keyname = self._field_key_decode(_key.text, feature_layer.fields)
+                            _values = find_tags(_property, "Value")
+                            _value = None if len(_values) == 0 else _values[0]
+
+                            if fld_keyname == geom_column:
+                                geom_data = None if _value is None else _value[0]
+                            else:
+                                if _value is None:
+                                    value = None
+                                elif _value.text is None:
+                                    value = ""
+                                else:
+                                    value = _value.text
+                                field_data[fld_keyname] = value
+
+                        set_feature_data(feature, field_data, geom_data, feature_layer)
+
+                        feature_layer.feature_put(feature)
+
+                        if show_summary:
+                            summary["totalUpdated"] += 1
+                    else:  # "Delete":
+                        for fid in fids:
+                            feature_layer.feature_delete(fid)
+                        if show_summary:
+                            summary["totalDeleted"] += 1
+        finally:
+            for flayer in fversioning_flayers:
+                flayer.fversioning_close()
+
+        if show_summary:
+            for param, value in summary.items():
+                if value > 0:
+                    El(param, namespace=_ns_wfs, text=str(value), parent=_summary)
+
+        if self.p_version == v100:
+            _result = El("TransactionResult", namespace=_ns_wfs, parent=_response)
+            _status = El("Status", namespace=_ns_wfs, parent=_result)
+            El("SUCCESS", namespace=_ns_wfs, parent=_status)
+
+        return _response
+
+
+def date_from_iso(value):
+    return date.fromisoformat(value)
+
+
+def datetime_from_iso(value):
+    return datetime.fromisoformat(value)
+
+
+# Sets feature fields from string represented values and XML element geometry
+def set_feature_data(
+    feature: Feature,
+    field_data: dict[str, str | None],
+    geom_data: "etree.Element | None | UnsetType",
+    feature_layer: IFeatureLayer,
+):
+    if geom_data is UNSET:
+        pass
+    elif geom_data is None:
+        feature.geom = None
+    else:
+        try:
+            geom = geom_from_gml(geom_data)
+        except GeometryNotValid:
+            raise ValidationError("Geometry is not valid.")
+        if geom.srid is not None and geom.srid != feature_layer.srs_id:
+            geom = transform(geom, feature_layer.srs)
+        feature.geom = geom
+
+    for k, v in field_data.items():
+        try:
+            field = feature_layer.field_by_keyname(k)
+        except KeyError:
+            raise ValidationError("Unknown field '%s'." % k)
+
+        if v is None:
+            pass
+        elif field.datatype in (FIELD_TYPE.INTEGER, FIELD_TYPE.BIGINT):
+            v = int(v)
+        elif field.datatype == FIELD_TYPE.REAL:
+            v = float(v)
+        elif field.datatype == FIELD_TYPE.STRING:
+            pass
+        elif field.datatype == FIELD_TYPE.DATE:
+            v = date_from_iso(v)
+        elif field.datatype == FIELD_TYPE.TIME:
+            v = time.fromisoformat(v)
+        elif field.datatype == FIELD_TYPE.DATETIME:
+            v = datetime_from_iso(v)
+        elif field.datatype == FIELD_TYPE.BOOLEAN:
+            v = v.lower() in ("true", "1")
+        elif field.datatype == FIELD_TYPE.JSON:
+            v = loads(v)
+        else:
+            raise NotImplementedError
+
+        feature.fields[k] = v

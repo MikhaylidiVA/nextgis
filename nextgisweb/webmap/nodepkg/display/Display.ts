@@ -1,0 +1,303 @@
+import { action, computed, observable, reaction } from "mobx";
+import type { Extent } from "ol/extent";
+import { transformExtent } from "ol/proj";
+
+import { errorModal } from "@nextgisweb/gui/error";
+import { gettext } from "@nextgisweb/pyramid/i18n";
+import { layoutStore } from "@nextgisweb/pyramid/layout";
+import { imageQueue } from "@nextgisweb/pyramid/util";
+import type { DisplayConfig } from "@nextgisweb/webmap/type/api";
+import { WebMapTabsStore } from "@nextgisweb/webmap/webmap-tabs";
+
+import settings from "../client-settings";
+import { HighlightStore } from "../highlight-store";
+import { MapStore } from "../ol/MapStore";
+import { PanelManager } from "../panel/PanelManager";
+import type { PluginBase } from "../plugin/PluginBase";
+import { Identify, TreeStore } from "../store";
+import type { TreeItemStore } from "../store/tree-store/TreeItemStore";
+import type { DisplayURLParams, MapPlugin, TinyConfig } from "../type";
+import { AnnotationsManager } from "../ui/annotations-manager";
+import { normalizeExtent } from "../utils/normalizeExtent";
+
+import { ConfigStore } from "./ConfigStore";
+import { displayURLParams } from "./displayURLParams";
+
+export class Display {
+  displayProjection = "EPSG:3857";
+  lonlatProjection = "EPSG:4326";
+
+  readonly config: ConfigStore;
+  tinyConfig?: TinyConfig;
+  clientSettings = settings;
+
+  readonly map: MapStore;
+
+  identify: Identify;
+  treeStore: TreeStore;
+  tabsManager: WebMapTabsStore;
+  highlighter = new HighlightStore();
+  panelManager: PanelManager;
+  annotationsManager: AnnotationsManager;
+
+  @observable.ref accessor plugins: Record<string, PluginBase> = {};
+
+  urlParams: DisplayURLParams;
+
+  @observable.ref accessor mapReady = false;
+  @observable.ref accessor item: TreeItemStore | null = null;
+  @observable.ref accessor isMobile = false;
+
+  constructor({
+    config,
+    tinyConfig,
+  }: {
+    config: DisplayConfig;
+    tinyConfig?: TinyConfig;
+  }) {
+    this.config = new ConfigStore(config);
+    this.tinyConfig = tinyConfig;
+    this.urlParams = displayURLParams.values();
+
+    this.tabsManager = new WebMapTabsStore();
+
+    this.config.initialExtent = normalizeExtent(this.config.initialExtent);
+    const initialExtent = transformExtent(
+      this.config.initialExtent,
+      this.lonlatProjection,
+      this.displayProjection
+    );
+
+    let constrainingExtent: Extent | undefined = undefined;
+    if (this.config.constrainingExtent) {
+      this.config.constrainingExtent = normalizeExtent(
+        this.config.constrainingExtent
+      );
+      constrainingExtent = transformExtent(
+        this.config.constrainingExtent,
+        this.lonlatProjection,
+        this.displayProjection
+      );
+    }
+
+    const hmux = this.config.hmux;
+
+    if (hmux) {
+      imageQueue.setLimit(100);
+    }
+
+    this.map = new MapStore({
+      logo: false,
+      controls: [],
+      initialExtent,
+      constrainingExtent,
+      measureSrsId: this.config.measureSrsId,
+      displayProjection: this.displayProjection,
+      lonlatProjection: this.lonlatProjection,
+      hmux,
+    });
+    this.identify = new Identify({ display: this });
+    this.annotationsManager = new AnnotationsManager({ display: this });
+
+    this.panelManager = new PanelManager({
+      display: this,
+    });
+
+    this.treeStore = new TreeStore(this.config.rootItem, {
+      drawOrderEnabled: this.config.drawOrderEnabled,
+    });
+
+    this._bindConfigStore();
+    this._identifyFeatureByAttrValue();
+
+    this._setUpLayersTree();
+  }
+  startup() {
+    this._hideNavMenuForGuest();
+  }
+
+  @action.bound
+  setIsMobile(val: boolean) {
+    this.isMobile = val;
+  }
+
+  @action.bound
+  setMapReady(status: boolean) {
+    this.mapReady = status;
+  }
+
+  getVisibleItems() {
+    const store = this.treeStore;
+    return store.filter({ type: "layer", visibility: true });
+  }
+
+  @action.bound
+  private _setUpLayersTree() {
+    const store = this.treeStore;
+    const urlStyles = this.urlParams.styles;
+    if (urlStyles) {
+      const checked: number[] = [];
+      store.items.forEach((item) => {
+        let cond;
+        if (item.isLayer()) {
+          const styleId = item.styleId;
+          cond = styleId in urlStyles;
+          if (cond) {
+            const symbols = urlStyles[styleId];
+            if (symbols) {
+              item.update({
+                symbols: symbols === "-1" ? [] : symbols,
+              });
+            }
+            checked.push(item.id);
+          }
+        }
+      });
+      store.setVisibleIds(checked);
+    }
+  }
+
+  private _bindConfigStore() {
+    reaction(
+      () => this.config.rootItem,
+      (rootItem) => {
+        this.treeStore.load(rootItem);
+      }
+    );
+    reaction(
+      () => this.config.drawOrderEnabled,
+      (val) => {
+        this.treeStore.setDrawOrderEnabled(val);
+      }
+    );
+    reaction(
+      () => this.config.pluginKeys,
+      (pluginKeys) => {
+        this.installPlugins(pluginKeys);
+      },
+      { fireImmediately: true }
+    );
+    reaction(
+      () => this.config.measureSrsId,
+      (measureSrsId) => {
+        this.map.setMeasureSrsId(measureSrsId);
+      }
+    );
+  }
+
+  // PLUGINS
+
+  async installPlugins(pluginKeys: string[]) {
+    const pluginsToLoad: Promise<MapPlugin | { default: MapPlugin }>[] = [];
+    for (const key of pluginKeys) {
+      if (this.plugins[key]) {
+        continue;
+      }
+      if (this.isTinyMode && !this.isTinyModePlugin(key)) {
+        continue;
+      }
+
+      const pluginLoader = ngwEntry(key) as Promise<
+        MapPlugin | { default: MapPlugin }
+      >;
+      pluginLoader.then((pluginInfo) => {
+        if (!pluginInfo) {
+          return;
+        }
+
+        if ("default" in pluginInfo) {
+          pluginInfo = pluginInfo.default;
+        }
+
+        const plugin = new pluginInfo({
+          identity: key,
+          display: this,
+          treeStore: this.treeStore,
+        });
+
+        this.setPlugin(key, plugin);
+      });
+      pluginsToLoad.push(pluginLoader);
+    }
+
+    await Promise.allSettled(pluginsToLoad);
+
+    return this.plugins;
+  }
+
+  @action.bound
+  private setPlugin(key: string, plugin: PluginBase) {
+    this.plugins = {
+      ...this.plugins,
+      [key]: plugin,
+    };
+  }
+
+  isTinyModePlugin(pluginKey: string) {
+    const disabledPlugins = [
+      "@nextgisweb/webmap/plugin/layer-editor",
+      "@nextgisweb/webmap/plugin/feature-layer",
+    ];
+    return !disabledPlugins.includes(pluginKey);
+  }
+
+  // FEATURE
+
+  @action
+  setItem(item: TreeItemStore | null) {
+    this.item = item;
+  }
+
+  handleSelect(selectedKeys: number[]) {
+    if (selectedKeys.length < 1) {
+      this.setItem(null);
+      return;
+    }
+    const itemId = selectedKeys[0];
+    const item = this.treeStore.getItemById(itemId);
+
+    this.setItem(item);
+  }
+
+  private _identifyFeatureByAttrValue() {
+    const urlParams = this.urlParams;
+
+    if (
+      !(
+        urlParams.hl_lid !== undefined &&
+        urlParams.hl_attr !== undefined &&
+        urlParams.hl_val !== undefined
+      )
+    ) {
+      return;
+    }
+
+    this.identify
+      .identifyFeatureByAttrValue(
+        Number(urlParams.hl_lid),
+        urlParams.hl_attr,
+        urlParams.hl_val,
+        urlParams.zoom !== undefined ? Number(urlParams.zoom) : undefined
+      )
+      .then((result) => {
+        if (result) return;
+        errorModal({
+          title: gettext("Object not found"),
+          message: gettext("Object from URL parameters not found"),
+        });
+      });
+  }
+
+  //  UI
+
+  @computed
+  get isTinyMode() {
+    return this.tinyConfig !== undefined;
+  }
+
+  private _hideNavMenuForGuest() {
+    const shouldHideMenu =
+      this.clientSettings.hide_nav_menu && ngwConfig.isGuest;
+    layoutStore.setHideMenu(shouldHideMenu);
+  }
+}

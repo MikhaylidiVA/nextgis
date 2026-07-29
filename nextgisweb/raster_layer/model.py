@@ -1,0 +1,893 @@
+import glob
+import math
+import os
+import subprocess
+from functools import cached_property
+from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryDirectory
+from typing import Annotated, Literal
+from urllib.parse import urlparse
+from uuid import uuid4
+from zipfile import ZipFile, is_zipfile
+
+import sqlalchemy as sa
+import sqlalchemy.dialects.postgresql as sa_pg
+import sqlalchemy.orm as orm
+from affine import Affine
+from msgspec import UNSET, Meta, Struct, UnsetType
+from osgeo import gdal, gdalconst, ogr, osr
+from zope.interface import implementer
+
+from nextgisweb.env import COMP_ID, Base, env, gettext, gettextf, ngettextf
+from nextgisweb.lib.humanize import format_size
+from nextgisweb.lib.logging import logger
+from nextgisweb.lib.osrhelper import SpatialReferenceError, sr_from_epsg, sr_from_wkt
+from nextgisweb.lib.saext import Msgspec
+
+from nextgisweb.core.exception import ValidationError
+from nextgisweb.core.storage import StorageInsufficient
+from nextgisweb.file_storage import FileObj
+from nextgisweb.file_upload import FileUploadRef
+from nextgisweb.file_upload.exception import UnsupportedFile
+from nextgisweb.file_upload.model import FileUpload
+from nextgisweb.layer import IBboxLayer, SpatialLayerMixin
+from nextgisweb.resource import (
+    ConnectionScope,
+    CRUTypes,
+    DataScope,
+    Resource,
+    ResourceGroup,
+    ResourceScope,
+    SAttribute,
+    SColumn,
+    Serializer,
+    SRelationship,
+    SResource,
+)
+from nextgisweb.resource.category import ExternalConnectionsCategory
+from nextgisweb.spatial_ref_sys import SRS
+
+from .kind_of_data import RasterLayerData
+from .util import (
+    band_color_interp,
+    calc_overviews_levels,
+    get_predictor,
+    is_rgb,
+    msg_supported_formats,
+    raster_size,
+)
+from .validate_cog import validate as validate_cog
+
+Base.depends_on("resource")
+
+PYRAMID_TARGET_SIZE = 512
+
+SUPPORTED_DRIVERS = ("GTiff", "PNG", "JPEG")
+
+
+def get_dataset_srs(ds: gdal.Dataset) -> osr.SpatialReference:
+    dsproj = ds.GetProjection()
+    dsgtran = ds.GetGeoTransform()
+
+    if not dsproj or not dsgtran:
+        raise ValidationError(gettext("Raster files without projection info are not supported."))
+
+    # Workaround for broken encoding in WKT. Otherwise, it'll cause SWIG
+    # TypeError (not a string) while passing to GDAL.
+    try:
+        dsproj.encode("utf-8", "strict")
+    except UnicodeEncodeError:
+        dsproj = dsproj.encode("utf-8", "replace").decode("utf-8")
+
+    try:
+        src_osr = sr_from_wkt(dsproj)
+        if src_osr.IsLocal() and (code := src_osr.GetAuthorityCode(None)) is not None:
+            # The coordinate system may be interpreted as 'local' when the
+            # definitions from EPSG code and GeoTIFF keys are inconsistent.
+            # Starting with GDAL 3.5, the GTIFF_SRS_SOURCE configuration
+            # option can be used to control this behavior.
+            src_osr = sr_from_epsg(int(code))
+    except SpatialReferenceError:
+        raise ValidationError(gettext("GDAL was unable to parse the raster coordinate system."))
+
+    return src_osr
+
+
+def get_dataset_data_type(ds: gdal.Dataset) -> int:
+    data_type = None
+    for bidx in range(1, ds.RasterCount + 1):
+        band = ds.GetRasterBand(bidx)
+        if data_type is None:
+            data_type = band.DataType
+        elif data_type != band.DataType:
+            raise ValidationError(gettext("Mixed band data types are not supported."))
+    return data_type
+
+
+class RasterBand(Struct):
+    color_interp: str
+    min: float | None
+    max: float | None
+    rat: bool
+    no_data: float | Literal["NaN"] | None = None
+
+
+class RasterLayerMeta(Struct):
+    bands: list[RasterBand]
+
+
+class RasterLayerStorage(Resource):
+    identity = "raster_layer_storage"
+    cls_display_name = gettext("Raster layer storage")
+    cls_category = ExternalConnectionsCategory
+
+    __scope__ = ConnectionScope
+
+    endpoint = sa.Column(sa.Unicode, nullable=False)
+    bucket = sa.Column(sa.Unicode, nullable=False)
+    access_key = sa.Column(sa.Unicode, nullable=True)
+    secret_key = sa.Column(sa.Unicode, nullable=True)
+    prefix = sa.Column(sa.Unicode, nullable=False)
+
+    @classmethod
+    def check_parent(cls, parent):
+        return isinstance(parent, ResourceGroup)
+
+    @property
+    def public(self) -> bool:
+        return self.access_key is None and self.secret_key is None
+
+    def vsi_path(self, filename: str) -> str:
+        prefix = (self.prefix.rstrip("/") + "/") if self.prefix else ""
+        return f"/vsis3/{self.bucket}/{prefix}{filename.lstrip('/')}"
+
+    def vsi_credentials(self) -> dict:
+        parsed = urlparse(self.endpoint)
+        result = {
+            "AWS_S3_ENDPOINT": parsed.netloc,
+            "AWS_HTTPS": "YES" if parsed.scheme == "https" else "NO",
+            "AWS_VIRTUAL_HOSTING": "FALSE",
+        }
+        if self.public:
+            result["AWS_NO_SIGN_REQUEST"] = "YES"
+        else:
+            result["AWS_ACCESS_KEY_ID"] = self.access_key
+            result["AWS_SECRET_ACCESS_KEY"] = self.secret_key
+        return result
+
+    def register_credentials(self) -> None:
+        """Register S3 credentials as path-specific GDAL options.
+
+        Must be called per-read rather than once globally for two reasons:
+        1. Each worker process has its own GDAL state, so credentials set in
+           one process are invisible to others in a multi-worker deployment.
+        2. SetPathSpecificOption is keyed by path prefix only, so two storages
+           sharing the same bucket and prefix but pointing at different endpoints
+           would silently overwrite each other if registered globally. Calling
+           this right before each open means the correct credentials are always
+           in place for the current request.
+        """
+        path_prefix = self.vsi_path("")
+        for key, value in self.vsi_credentials().items():
+            gdal.SetPathSpecificOption(path_prefix, key, value)
+
+    def configure_gdal(self) -> None:
+        """Register S3 credentials and performance options with GDAL."""
+        self.register_credentials()
+
+        # Global performance options recommended for reading COGs from S3.
+        # See https://developmentseed.org/titiler/advanced/performance_tuning/
+        gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "YES")
+        gdal.SetConfigOption("GDAL_HTTP_MERGE_CONSECUTIVE_RANGES", "YES")
+        gdal.SetConfigOption("VSI_CACHE", "TRUE")
+        gdal.SetConfigOption("VSI_CACHE_SIZE", "5000000")  # 5 MB per file handle
+        gdal.SetConfigOption("CPL_VSIL_CURL_CACHE_SIZE", "200000000")  # 200 MB LRU
+        gdal.SetConfigOption("GDAL_CACHEMAX", "200")  # 200 MB block cache
+        gdal.SetConfigOption("GDAL_BAND_BLOCK_CACHE", "HASHSET")
+        gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif,.TIF,.tiff,.aux.xml")
+        gdal.SetConfigOption("GDAL_INGESTED_BYTES_AT_OPEN", "32768")
+
+
+class RasterLayerStorageSerializer(Serializer, resource=RasterLayerStorage):
+    endpoint = SColumn(read=ConnectionScope.read, write=ConnectionScope.write)
+    bucket = SColumn(read=ConnectionScope.read, write=ConnectionScope.write)
+    access_key = SColumn(read=ConnectionScope.read, write=ConnectionScope.write)
+    secret_key = SColumn(read=ConnectionScope.read, write=ConnectionScope.write)
+    prefix = SColumn(read=ConnectionScope.read, write=ConnectionScope.write)
+
+    def deserialize(self) -> None:
+        super().deserialize()
+        ak = self.obj.access_key
+        sk = self.obj.secret_key
+        if (ak is None) != (sk is None):
+            raise ValidationError(
+                gettext(
+                    "Access key and secret key must both be set (private bucket) "
+                    "or both be empty (public bucket)."
+                )
+            )
+
+
+@implementer(IBboxLayer)
+class RasterLayer(Resource, SpatialLayerMixin):
+    identity = "raster_layer"
+    cls_display_name = gettext("Raster layer")
+    cls_order = 65
+
+    __scope__ = DataScope
+
+    fileobj_id = sa.Column(sa.ForeignKey(FileObj.id), nullable=True)
+    fileobj_pam_id = sa.Column(sa.ForeignKey(FileObj.id), nullable=True)
+
+    xsize = sa.Column(sa.Integer, nullable=False)
+    ysize = sa.Column(sa.Integer, nullable=False)
+    dtype = sa.Column(sa.Unicode, nullable=False)
+    band_count = sa.Column(sa.Integer, nullable=False)
+    geo_transform = sa.Column(
+        sa_pg.ARRAY(sa.FLOAT, dimensions=1, zero_indexes=True),
+        nullable=True,
+    )
+    cog = sa.Column(sa.Boolean, nullable=False, default=False)
+
+    meta = sa.Column(Msgspec(RasterLayerMeta), nullable=True)
+
+    storage_id = sa.Column(sa.ForeignKey(RasterLayerStorage.id), nullable=True)
+    storage_filename = sa.Column(sa.Unicode, nullable=True)
+
+    fileobj = orm.relationship(FileObj, foreign_keys=fileobj_id, cascade="all")
+    fileobj_pam = orm.relationship(FileObj, foreign_keys=fileobj_pam_id, cascade="all")
+    storage = orm.relationship(RasterLayerStorage, foreign_keys=storage_id)
+
+    @classmethod
+    def check_parent(cls, parent):
+        return isinstance(parent, ResourceGroup)
+
+    def load_file(self, filename: str | Path | FileUpload, *, cog=False):
+        file_upload = None
+        if isinstance(filename, Path):
+            filename = str(filename)
+        elif isinstance(filename, FileUpload):
+            file_upload = filename
+            filename = filename.data_path
+
+        if is_zipfile(filename):
+            zip_filename = "/vsizip/{%s}" % filename
+            supported_extensions = set(
+                ext
+                for driver_name in SUPPORTED_DRIVERS
+                for ext in gdal.GetDriverByName(driver_name)
+                .GetMetadata()
+                .get("DMD_EXTENSIONS", "")
+                .split()
+            )
+            # Assuming extensions are present and correctly indicate file types
+            supported_zip_items = []
+            for zip_item in gdal.ReadDir(zip_filename):
+                zip_item_ext = Path(zip_item).suffix.removeprefix(".")
+                if zip_item_ext.lower() in supported_extensions:
+                    supported_zip_items.append(zip_item)
+            if not supported_zip_items:
+                raise ValidationError(gettext("No supported files found in the archive."))
+            if len(supported_zip_items) > 1:
+                raise ValidationError(
+                    gettextf(
+                        "The archive contains multiple supported files: {supported_zip_items}."
+                    )(supported_zip_items=", ".join(supported_zip_items))
+                )
+            filename = f"{zip_filename}/{supported_zip_items[0]}"
+
+        comp = env.raster_layer
+
+        ds = gdal.OpenEx(filename, gdalconst.GA_ReadOnly, allowed_drivers=SUPPORTED_DRIVERS)
+        if not ds:
+            raise UnsupportedFile(file_upload, detail=msg_supported_formats)
+
+        src_osr = get_dataset_srs(ds)
+        dsgtran = ds.GetGeoTransform()
+        data_type = get_dataset_data_type(ds)
+
+        alpha_band = None
+        has_nodata = None
+        mask_flags = []
+        for bidx in range(1, ds.RasterCount + 1):
+            band = ds.GetRasterBand(bidx)
+
+            mask_flags.append(band.GetMaskFlags())
+
+            if band.GetRasterColorInterpretation() == gdal.GCI_AlphaBand:
+                assert alpha_band is None, "Multiple alpha bands found!"
+                alpha_band = bidx
+            else:
+                has_nodata = (has_nodata is None or has_nodata) and (
+                    band.GetNoDataValue() is not None
+                )
+
+        # Convert the mask band to the alpha band
+        if mask_flags.count(gdal.GMF_PER_DATASET) == len(mask_flags):
+            bands = [bidx for bidx in range(1, ds.RasterCount + 1)]
+            bands.append("mask")
+            alpha_band = len(bands)
+            with NamedTemporaryFile(suffix=".tif", delete=False) as tf:
+                topts = gdal.TranslateOptions(bandList=bands)
+                ds = gdal.Translate(tf.name, ds, options=topts)
+                ds.GetRasterBand(alpha_band).SetColorInterpretation(gdal.GCI_AlphaBand)
+                ds = None
+
+                # gdal.Translate may generate auxiliary files (e.g., .aux.xml)
+                # to store metadata or additional info - we include all such
+                # files in the ZIP archive to ensure nothing is lost.
+                base, _ = os.path.splitext(tf.name)
+                ds_files = glob.glob(base + ".*")
+                if filename.startswith("/vsizip/"):
+                    filename = filename[filename.find("{") + 1 : filename.find("}")]
+                with ZipFile(filename, "w") as zf:
+                    for file in ds_files:
+                        zf.write(file, arcname=os.path.basename(file))
+                        os.remove(file)
+
+                zip_filename = "/vsizip/{%s}" % filename
+                filename = f"{zip_filename}/{os.path.basename(tf.name)}"
+                ds = gdal.Open(filename, gdalconst.GA_ReadOnly)
+
+        if src_osr.IsLocal():
+            raise ValidationError(
+                gettext(
+                    "The source raster has a local coordinate system and can't be "
+                    "reprojected to the target coordinate system."
+                )
+            )
+
+        dst_osr = self.srs.to_osr()
+
+        reproject = not src_osr.IsSame(dst_osr)
+        rectilinear = Affine.from_gdal(*dsgtran).is_rectilinear
+        add_alpha = reproject and not has_nodata and alpha_band is None
+
+        if reproject or not rectilinear:
+            cmd = ["gdalwarp", "-t_srs", "EPSG:%d" % self.srs.id]
+            if add_alpha:
+                cmd.append("-dstalpha")
+            ds_measure = gdal.Warp(
+                "", ds, format="VRT", srcSRS=src_osr.ExportToWkt(), dstSRS=dst_osr.ExportToWkt()
+            )
+            if ds_measure is None:
+                message = gettext(
+                    "Failed to reproject the raster to the target coordinate system."
+                )
+                gdal_err = gdal.GetLastErrorMsg().strip()
+                if gdal_err != "":
+                    message += " " + gettext("GDAL error message: %s") % gdal_err
+                raise ValidationError(message=message)
+        else:
+            cmd = ["gdal_translate"]
+            ds_measure = ds
+
+        size_expected = raster_size(
+            ds_measure,
+            1 if add_alpha else 0,
+            data_type=data_type if gdal.VersionInfo() < "3030300" else None,
+        )  # https://github.com/OSGeo/gdal/issues/4469
+
+        size_limit = comp.size_limit
+        if size_limit is not None and size_expected > size_limit:
+            raise ValidationError(
+                title=gettext("Raster too large"),
+                message=gettextf(
+                    "The uncompressed raster size ({uncompressed_size}) exceeds the limit "
+                    "({max_size}) by {excess_size}. Reduce the raster size to fit the limit."
+                )(
+                    uncompressed_size=format_size(size_expected),
+                    max_size=format_size(size_limit),
+                    excess_size=format_size(size_expected - size_limit),
+                ),
+            )
+
+        # S3 always uses COG - overviews are built into the file
+        if self.storage is not None:
+            cog = True
+
+        storage_required = size_expected // 2
+        try:
+            env.core.check_storage_limit(storage_required)
+        except StorageInsufficient as exc:
+            raise RasterLayerUncompressedStorageInsufficient(
+                cause=exc, uncompressed_size=size_expected
+            ) from exc
+
+        predictor = get_predictor(data_type)
+        use_jpeg_compression = is_rgb(ds)
+
+        self.cog = cog
+        if cog:
+            cmd_opts = [
+                "-of",
+                "COG",
+                "-co",
+                "BLOCKSIZE=256",
+                "-co",
+                "RESAMPLING=NEAREST",
+                "-co",
+                f"OVERVIEW_COMPRESS={'JPEG' if use_jpeg_compression else 'DEFLATE'}",
+            ]
+            if not use_jpeg_compression and predictor is not None:
+                cmd_opts.extend(["-co", f"OVERVIEW_PREDICTOR={predictor}"])
+        else:
+            cmd_opts = (
+                "-of",
+                "GTiff",
+                "-co",
+                "TILED=YES",
+                "-co",
+                "BLOCKXSIZE=256",
+                "-co",
+                "BLOCKYSIZE=256",
+            )
+
+        cmd.extend(("-co", "COMPRESS=DEFLATE", "-co", "BIGTIFF=YES"))
+        # Predictor for original resolution (both COG and non-COG)
+        if predictor is not None:
+            cmd.extend(("-co", f"PREDICTOR={predictor}"))
+        cmd.append(filename)
+        cmd.extend(cmd_opts)
+
+        if self.storage is not None:
+            ds = self._load_file_s3(cmd)
+        else:
+            ds = self._load_file_local(cmd)
+
+        try:
+            assert raster_size(ds) == size_expected, "Expected size mismatch"
+        except AssertionError:
+            # https://github.com/OSGeo/gdal/commit/6b5f015195ccf683b6ca5ab6a8425921516225c1
+            band = ds.GetRasterBand(1)
+            band_measure = ds_measure.GetRasterBand(1)
+            if band.DataType != band_measure.DataType:
+                logger.error(
+                    "Data type changed during warp from '%s' to '%s' (nodata: '%s')",
+                    gdal.GetDataTypeName(band.DataType),
+                    gdal.GetDataTypeName(band_measure.DataType),
+                    band.GetNoDataValue(),
+                )
+            else:
+                raise
+        finally:
+            ds_measure = None
+
+        self.populate_meta(ds, data_type)
+
+    def populate_meta(self, ds: gdal.Dataset, data_type: int) -> None:
+        self.dtype = gdal.GetDataTypeName(data_type)
+        self.xsize = ds.RasterXSize
+        self.ysize = ds.RasterYSize
+        self.band_count = ds.RasterCount
+        self.geo_transform = list(ds.GetGeoTransform())
+
+        bands = []
+        for bidx in range(1, ds.RasterCount + 1):
+            band = ds.GetRasterBand(bidx)
+            minval, maxval = band.ComputeRasterMinMax(False)
+            bands.append(
+                RasterBand(
+                    color_interp=band_color_interp(band),
+                    no_data=band.GetNoDataValue(),
+                    rat=band.GetDefaultRAT() is not None,
+                    min=None if math.isnan(minval) else minval,
+                    max=None if math.isnan(maxval) else maxval,
+                )
+            )
+        self.meta = RasterLayerMeta(bands=bands)
+
+    def _load_file_local(self, cmd: list) -> gdal.Dataset:
+        comp = env.raster_layer
+        fobj = FileObj(component="raster_layer")
+        dst_file = str(comp.workdir_path(fobj, None, makedirs=True))
+        self.fileobj = fobj
+        subprocess.check_call(cmd + [dst_file])
+        self.build_overview()
+        if os.path.exists(aux_xml_file := dst_file + ".aux.xml"):
+            fobj_pam = FileObj(component="raster_layer")
+            fobj_pam = fobj_pam.copy_from(aux_xml_file)
+            self.fileobj_pam = fobj_pam
+            comp.workdir_path(fobj, fobj_pam, makedirs=True)
+        else:
+            # Cleanup PAM FileObj reference on replace
+            self.fileobj_pam = None
+        return gdal.Open(dst_file, gdalconst.GA_ReadOnly)
+
+    def _load_file_s3(self, cmd: list) -> gdal.Dataset:
+        storage = self.storage
+        if storage.public:
+            raise ValidationError(
+                gettext("Uploading files to a public (read-only) bucket is not allowed.")
+            )
+        s3_env = storage.vsi_credentials()
+        if self.storage_filename is None:
+            self.storage_filename = str(uuid4()) + ".tif"
+        s3_path = storage.vsi_path(self.storage_filename)
+        with TemporaryDirectory() as tmpdir:
+            local = os.path.join(tmpdir, "raster.tif")
+            subprocess.check_call(cmd + [local])
+            with gdal.config_options(s3_env):
+                vsi = gdal.VSIFOpenL(s3_path, "wb")
+                try:
+                    with open(local, "rb") as f:
+                        while chunk := f.read(16 * 1024 * 1024):
+                            gdal.VSIFWriteL(chunk, 1, len(chunk), vsi)
+                finally:
+                    gdal.VSIFCloseL(vsi)
+        return self._s3_open(s3_path)
+
+    def _s3_open(self, s3_path: str) -> gdal.Dataset:
+        self.storage.configure_gdal()
+        return gdal.Open(s3_path, gdalconst.GA_ReadOnly)
+
+    def load_storage_path(self, path: str):
+        """Load metadata from an existing file in the storage without modification.
+
+        Unlike load_file(), this does not process, reproject, or upload the
+        file - it reads metadata from the S3 object as-is. The storage
+        attribute must already be set before calling this.
+        """
+        ds = self._s3_open(self.storage.vsi_path(path))
+        if ds is None:
+            raise ValidationError(
+                gettext("Failed to open raster file at the specified storage path.")
+            )
+
+        _, errors, _ = validate_cog(ds)
+        if errors:
+            raise ValidationError(
+                gettext("The raster file must be a Cloud Optimized GeoTIFF (COG).")
+            )
+
+        src_osr = get_dataset_srs(ds)
+        data_type = get_dataset_data_type(ds)
+
+        if src_osr.IsLocal():
+            raise ValidationError(
+                gettext("The raster has a local coordinate system and is not supported.")
+            )
+
+        auth_name = src_osr.GetAuthorityName(None)
+        auth_code = src_osr.GetAuthorityCode(None)
+
+        srs = None
+        if auth_code is not None:
+            srs = SRS.filter_by(
+                auth_name=auth_name or "EPSG", auth_srid=int(auth_code)
+            ).one_or_none()
+
+        if srs is None:
+            if auth_code is None:
+                raise ValidationError(
+                    gettext(
+                        "The raster coordinate system could not be identified. "
+                        "Make sure the file has a recognized EPSG coordinate system."
+                    )
+                )
+            raise ValidationError(
+                gettextf(
+                    "The raster coordinate system ({auth}:{code}) is not registered "
+                    "in NextGIS Web. Add it to the list of supported coordinate "
+                    "systems first."
+                )(auth=auth_name or "EPSG", code=auth_code)
+            )
+
+        self.srs = srs
+        self.storage_filename = path
+        self.cog = True
+        self.populate_meta(ds, data_type)
+
+    def gdal_dataset(self):
+        if self.storage is not None:
+            return self._s3_open(self.storage.vsi_path(self.storage_filename))
+        fn = env.raster_layer.workdir_path(self.fileobj, self.fileobj_pam)
+        return gdal.Open(str(fn), gdalconst.GA_ReadOnly)
+
+    def build_overview(self, missing_only=False, fn=None):
+        if fn is None and self.cog:
+            return
+
+        if fn is None:
+            fn = env.raster_layer.workdir_path(self.fileobj, self.fileobj_pam)
+
+        if missing_only and fn.with_suffix(".ovr").exists():
+            return
+
+        ds = gdal.Open(str(fn), gdalconst.GA_ReadOnly)
+        levels = list(map(str, calc_overviews_levels(ds)))
+
+        use_jpeg_compression = is_rgb(ds)
+        data_type = ds.GetRasterBand(1).DataType
+        predictor = get_predictor(data_type)
+
+        cmd = ["gdaladdo", "-q", "-clean", str(fn)]
+
+        logger.debug("Removing existing overviews with command: " + " ".join(cmd))
+        subprocess.check_call(cmd)
+
+        # IMPORTANT: "nearest" method does not create new values by averaging.
+        # It is the best choice to preserve initial pixel values for thematic
+        # data. However, this method is not well-suited for the continuous
+        # nature of satellite imagery, providing less visually pleasing and
+        # analytically accurate results. We need to develop a heuristic to
+        # distinguish different types of raster data and select the appropriate
+        # resampling method. For now, using "nearest" is the safest option to
+        # avoid altering pixel values.
+        resampling = "nearest"
+
+        compression = "JPEG" if use_jpeg_compression else "DEFLATE"
+
+        band_count = ds.RasterCount
+        ds = None
+
+        cmd = [
+            "gdaladdo",
+            "-q",
+            "-ro",
+            "-r",
+            resampling,
+            "--config",
+            "COMPRESS_OVERVIEW",
+            compression,
+            "--config",
+            "INTERLEAVE_OVERVIEW",
+            "PIXEL",
+            "--config",
+            "BIGTIFF_OVERVIEW",
+            "YES",
+        ]
+
+        if not use_jpeg_compression and predictor is not None:
+            cmd.extend(["--config", "PREDICTOR_OVERVIEW", str(predictor)])
+
+        # Use YCBCR photometric for 3-band RGB to align with COG driver behavior
+        if use_jpeg_compression and band_count == 3:
+            cmd.extend(["--config", "PHOTOMETRIC_OVERVIEW", "YCBCR"])
+
+        cmd.append(str(fn))
+
+        cmd.extend(levels)
+
+        logger.debug("Building raster overview with command: " + " ".join(cmd))
+        subprocess.check_call(cmd)
+
+    def get_info(self):
+        band_summary = ngettextf(
+            "{n} band with {t} data type",
+            "{n} bands with {t} data type",
+            self.band_count,
+        )
+        return (
+            *(s() if (s := getattr(super(), "get_info", None)) else ()),
+            (gettext("Band summary"), band_summary(n=self.band_count, t=self.dtype)),
+            (gettext("Pixel dimensions"), "{} × {}".format(self.xsize, self.ysize)),
+            (gettext("Cloud Optimized GeoTIFF (COG)"), bool(self.cog)),
+            (gettext("Persistent auxiliary metadata (PAM)"), bool(self.fileobj_pam)),
+        )
+
+    # IBboxLayer implementation:
+    @property
+    def extent(self):
+        """Возвращает охват слоя"""
+
+        src_osr = self.srs.to_osr()
+        dst_osr = sr_from_epsg(4326)
+
+        coordTrans = osr.CoordinateTransformation(src_osr, dst_osr)
+
+        ds = self.gdal_dataset()
+        geoTransform = ds.GetGeoTransform()
+
+        # ul | ur: upper left | upper right
+        # ll | lr: lower left | lower right
+        x_ul = geoTransform[0]
+        y_ul = geoTransform[3]
+
+        x_lr = x_ul + ds.RasterXSize * geoTransform[1] + ds.RasterYSize * geoTransform[2]
+        y_lr = y_ul + ds.RasterXSize * geoTransform[4] + ds.RasterYSize * geoTransform[5]
+
+        ll = ogr.Geometry(ogr.wkbPoint)
+        ll.AddPoint(x_ul, y_lr)
+        ll.Transform(coordTrans)
+
+        ur = ogr.Geometry(ogr.wkbPoint)
+        ur.AddPoint(x_lr, y_ul)
+        ur.Transform(coordTrans)
+
+        extent = dict(minLon=ll.GetX(), maxLon=ur.GetX(), minLat=ll.GetY(), maxLat=ur.GetY())
+
+        return extent
+
+    def _check_integrity(self):
+        ds = self.gdal_dataset()
+        if ds is None:
+            return "Can't read dataset"
+        if self.xsize != ds.RasterXSize:
+            return "Size X mismatch"
+        if self.ysize != ds.RasterYSize:
+            return "Size Y mismatch"
+
+        dt = gdal.GetDataTypeByName(self.dtype)
+        for bidx in range(1, self.band_count + 1):
+            band = ds.GetRasterBand(bidx)
+            if band is None:
+                return f"Can't read band #{bidx}"
+            if band.DataType != dt:
+                return f"Band #{bidx} data type mismatch"
+
+
+class RasterLayerUncompressedStorageInsufficient(StorageInsufficient):
+    message = gettextf(
+        "The uncompressed raster you are trying to upload is {uncompressed_size}. "
+        "At least {required_space} of storage space is required, but only {storage_free} "
+        "of {storage_limit} is available. "
+        "Reduce the size of the raster or free up some storage space."
+    )
+
+    def __init__(self, *, cause: StorageInsufficient, uncompressed_size: int):
+        self._uncompressed_size = uncompressed_size
+        super().__init__(
+            total=cause._storage_total,
+            limit=cause._storage_limit,
+            requested=cause._storage_requested,
+        )
+
+    def fmt_message(self):
+        return self.__class__.message(
+            uncompressed_size=format_size(self._uncompressed_size),
+            required_space=self.storage_requested,
+            storage_free=self.storage_free,
+            storage_limit=self.storage_limit,
+        )
+
+
+def estimate_raster_layer_data(resource):
+    fn = env.raster_layer.workdir_path(resource.fileobj, resource.fileobj_pam)
+    return fn.stat().st_size + (0 if resource.cog else fn.with_suffix(".ovr").stat().st_size)
+
+
+class SourceAttr(SAttribute):
+    ctypes = CRUTypes(FileUploadRef, FileUploadRef, FileUploadRef)
+
+    def set(self, srlzr: Serializer, value: FileUploadRef, *, create: bool):
+        use_s3 = srlzr.obj.storage is not None
+        cur_size = 0 if create or use_s3 else estimate_raster_layer_data(srlzr.obj)
+
+        cog = srlzr.data.cog
+        if cog is UNSET or cog is None:
+            cog = env.raster_layer.cog_default if cog is None or create else srlzr.obj.cog
+        srlzr.obj.load_file(value(), cog=cog)
+
+        if not use_s3:
+            new_size = estimate_raster_layer_data(srlzr.obj)
+            env.core.reserve_storage(
+                COMP_ID,
+                RasterLayerData,
+                value_data_volume=new_size - cur_size,
+                resource=srlzr.obj,
+            )
+
+
+class CogAttr(SColumn):
+    ctypes = CRUTypes(bool | None, bool, bool | None)
+
+    def set(self, srlzr: Serializer, value: bool | None, *, create: bool):
+        if srlzr.data.source is not UNSET or create:
+            return  # Just do nothing, SourceAttr will set the cog attribute
+
+        if value is None:
+            value = env.raster_layer.cog_default
+        if srlzr.obj.cog == value:
+            return
+
+        cur_size = estimate_raster_layer_data(srlzr.obj)
+        fn = env.raster_layer.workdir_path(srlzr.obj.fileobj, srlzr.obj.fileobj_pam)
+        srlzr.obj.load_file(fn, cog=value)
+
+        new_size = estimate_raster_layer_data(srlzr.obj)
+        env.core.reserve_storage(
+            COMP_ID,
+            RasterLayerData,
+            value_data_volume=new_size - cur_size,
+            resource=srlzr.obj,
+        )
+
+
+GeoTransformCoefficients = Annotated[
+    list[float],
+    Meta(min_length=6, max_length=6),
+]
+
+
+class GeoTransform(SAttribute):
+    ctypes = CRUTypes(
+        UnsetType,
+        GeoTransformCoefficients,
+        UnsetType,
+    )
+
+    def get(self, srlzr: Serializer) -> list[str]:
+        return (
+            srlzr.obj.geo_transform
+            if srlzr.obj.geo_transform is not None
+            else list(srlzr._gdal_dataset.GetGeoTransform())
+        )
+
+
+class Bands(SAttribute):
+    ctypes = CRUTypes(UnsetType, list[RasterBand], UnsetType)
+
+    def get(self, srlzr: Serializer) -> list[str]:
+        return srlzr.obj.meta.bands if srlzr.obj.meta is not None else []
+
+
+class ColorInterpretation(SAttribute):
+    ctypes = CRUTypes(list[str], list[str], list[str])
+
+    def get(self, srlzr: Serializer) -> list[str]:
+        return (
+            [band.color_interp for band in srlzr.obj.meta.bands]
+            if srlzr.obj.meta is not None
+            else [
+                band_color_interp(srlzr._gdal_dataset.GetRasterBand(bidx))
+                for bidx in range(1, srlzr._gdal_dataset.RasterCount + 1)
+            ]
+        )
+
+
+class StorageAttr(SResource):
+    def setup_types(self):
+        super().setup_types()
+        self.types = CRUTypes(self.types.create, self.types.read, UnsetType)
+
+
+class StorageFilenameAttr(SAttribute):
+    ctypes = CRUTypes(str, str | None, str)
+
+    def get(self, srlzr: Serializer) -> str | None:
+        return srlzr.obj.storage_filename
+
+    def set(self, srlzr: Serializer, value: str, *, create: bool):
+        if srlzr.obj.storage is None:
+            raise ValidationError(
+                gettext("Storage must be selected before specifying a storage filename.")
+            )
+        if srlzr.data.source is not UNSET:
+            # Both source and filename provided: store the filename so _load_file_s3 uses it
+            # instead of generating a random UUID name.
+            srlzr.obj.storage_filename = value
+        else:
+            srlzr.obj.load_storage_path(value)
+
+
+DataScope.read.require(ConnectionScope.connect, attr="storage", cls=RasterLayer, attr_empty=True)
+
+
+class RasterLayerSerializer(Serializer, resource=RasterLayer):
+    srs = SRelationship(read=ResourceScope.read, write=ResourceScope.update, required=False)
+
+    xsize = SColumn(read=ResourceScope.read)
+    ysize = SColumn(read=ResourceScope.read)
+    band_count = SColumn(read=ResourceScope.read)
+    dtype = SColumn(read=ResourceScope.read)
+    geo_transform = GeoTransform(read=ResourceScope.read)
+
+    bands = Bands(read=ResourceScope.read)
+
+    storage = StorageAttr(read=ResourceScope.read, write=DataScope.write)
+    storage_filename = StorageFilenameAttr(read=ResourceScope.read, write=DataScope.write)
+    source = SourceAttr(write=DataScope.write, required=False)
+    cog = CogAttr(read=ResourceScope.read, write=ResourceScope.update)
+
+    # TODO: After the maintenance process completes and the 'meta' column
+    # is populated, update the frontend to use the 'bands' property
+    # and remove 'color_interpretation' from the API
+    color_interpretation = ColorInterpretation(read=ResourceScope.read)
+
+    # TODO: Remove when metadata columns are consistently populated
+    @cached_property
+    def _gdal_dataset(self):
+        obj = self.obj
+        assert obj.meta is None and obj.geo_transform is None
+        return obj.gdal_dataset()

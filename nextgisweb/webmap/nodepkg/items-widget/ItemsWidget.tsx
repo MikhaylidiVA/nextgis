@@ -1,0 +1,269 @@
+import { sortBy } from "lodash-es";
+import { observer } from "mobx-react-lite";
+import { useMemo, useState } from "react";
+import type { ComponentProps, ReactNode } from "react";
+
+import { CheckboxValue, InputValue, Select, Space } from "@nextgisweb/gui/antd";
+import { LotMV } from "@nextgisweb/gui/arm";
+import { InputOpacity, InputScaleDenom } from "@nextgisweb/gui/component";
+import { FocusTable, action } from "@nextgisweb/gui/focus-table";
+import type { FocusTableAction } from "@nextgisweb/gui/focus-table";
+import { Area, Lot } from "@nextgisweb/gui/mayout";
+import { useAbortController } from "@nextgisweb/pyramid/hook";
+import { gettext } from "@nextgisweb/pyramid/i18n";
+import { ResourceSelect } from "@nextgisweb/resource/component";
+import { useFocusTablePicker } from "@nextgisweb/resource/component/resource-picker/hook/useFocusTablePicker";
+import type { EditorWidget } from "@nextgisweb/resource/type";
+import { getEffectiveDisplayName } from "@nextgisweb/resource/util/getEffectiveDisplayName";
+import settings from "@nextgisweb/webmap/client-settings";
+
+import { SelectLegendSymbols } from "../component";
+
+import { DrawOrderTable } from "./DrawOrder";
+import { Group, Layer } from "./Item";
+import type { ItemObject } from "./Item";
+import type { ItemsStore } from "./ItemsStore";
+
+import ReorderIcon from "@nextgisweb/icon/material/reorder";
+
+const { adapters } = settings;
+
+const msgDisplayName = gettext("Display name");
+const msgExpanded = gettext("Expanded");
+const msgExclusive = gettext("Exclusive");
+const msgEnabled = gettext("Enabled");
+const msgIdentifiable = gettext("Identifiable");
+const msgResource = gettext("Resource");
+const msgTransparency = gettext("Transparency");
+const msgMinScaleDenom = gettext("Min scale");
+const msgMaxScaleDenom = gettext("Max scale");
+const msgLegendSymbols = gettext("Legend");
+const msgAdapter = gettext("Adapter");
+const msgLayer = gettext("Layer");
+const msgGroup = gettext("Group");
+const msgDrawOrderEdit = gettext("Edit draw order");
+const msgDrawOrderCustomize = gettext("Customize draw order");
+
+export interface LayerWidgetProps {
+  item: Layer;
+  minScaleDenomAddon?: ReactNode;
+  maxScaleDenomAddon?: ReactNode;
+}
+
+const GroupWidget = observer(({ item }: { item: Group }) => {
+  return (
+    <Area pad>
+      <LotMV
+        label={msgDisplayName}
+        value={item.displayName}
+        component={InputValue}
+      />
+      <Lot>
+        <Space size="middle">
+          <CheckboxValue {...item.groupExpanded.cprops()}>
+            {msgExpanded}
+          </CheckboxValue>
+          <CheckboxValue {...item.groupExclusive.cprops()}>
+            {msgExclusive}
+          </CheckboxValue>
+        </Space>
+      </Lot>
+    </Area>
+  );
+});
+
+const adapterOptions = sortBy(
+  Object.entries(adapters).map(([k, v]) => ({
+    value: k,
+    label: v.display_name,
+  })),
+  "value"
+);
+
+type ScaleDenomInputProps = ComponentProps<typeof InputScaleDenom> & {
+  addon?: ReactNode;
+};
+
+function ScaleDenomInput({ addon, style, ...props }: ScaleDenomInputProps) {
+  const input = (
+    <InputScaleDenom {...props} style={{ width: "100%", ...style }} />
+  );
+
+  if (addon === undefined || addon === null) {
+    return input;
+  }
+
+  return (
+    <Space.Compact style={{ display: "flex", width: "100%" }}>
+      {input}
+      <Space.Addon>{addon}</Space.Addon>
+    </Space.Compact>
+  );
+}
+
+export const LayerWidget = observer(
+  ({ item, minScaleDenomAddon, maxScaleDenomAddon }: LayerWidgetProps) => {
+    return (
+      <Area pad cols={2}>
+        <LotMV
+          row
+          label={msgDisplayName}
+          value={item.displayName}
+          component={InputValue}
+        />
+        <Lot row>
+          <Space size="middle">
+            <CheckboxValue {...item.layerEnabled.cprops()}>
+              {msgEnabled}
+            </CheckboxValue>
+            <CheckboxValue {...item.layerIdentifiable.cprops()}>
+              {msgIdentifiable}
+            </CheckboxValue>
+          </Space>
+        </Lot>
+        <LotMV
+          row
+          label={msgResource}
+          value={item.layerStyleId}
+          component={ResourceSelect}
+          props={{
+            readOnly: true,
+            style: { width: "100%" },
+            pickerOptions: {
+              initParentId: item.store.composite.parent,
+            },
+          }}
+        />
+        <LotMV
+          label={msgMinScaleDenom}
+          value={item.layerMinScaleDenom}
+          component={ScaleDenomInput}
+          props={{
+            addon: minScaleDenomAddon,
+            style: { width: "100%" },
+          }}
+        />
+        <LotMV
+          label={msgMaxScaleDenom}
+          value={item.layerMaxScaleDenom}
+          component={ScaleDenomInput}
+          props={{
+            addon: maxScaleDenomAddon,
+            style: { width: "100%" },
+          }}
+        />
+        <LotMV
+          row
+          label={msgLegendSymbols}
+          value={item.layerLegendSymbols}
+          component={SelectLegendSymbols}
+          props={{ allowClear: true, style: { width: "100%" } }}
+        />
+        <LotMV
+          row
+          label={msgAdapter}
+          value={item.layerAdapter}
+          component={Select<string>}
+          props={{
+            style: { width: "100%" },
+            options: adapterOptions,
+          }}
+        />
+        <LotMV
+          row
+          label={msgTransparency}
+          value={item.layerTransparency}
+          component={InputOpacity}
+          props={{ alphaMode: "transparency", valuePercent: true }}
+        />
+      </Area>
+    );
+  }
+);
+
+GroupWidget.displayName = "GroupWidget";
+LayerWidget.displayName = "LayerWidget";
+
+export const ItemsWidget: EditorWidget<ItemsStore> = observer(({ store }) => {
+  const { makeSignal } = useAbortController();
+  const [drawOrderEdit, setDrawOrderEdit] = useState(false);
+
+  const { pickToFocusTable } = useFocusTablePicker({
+    initParentId: store.composite.parent || undefined,
+  });
+
+  const drawOrderEnabled = store.drawOrderEnabled.value;
+  const { tableActions, itemActions } = useMemo(
+    () => ({
+      tableActions: [
+        pickToFocusTable<ItemObject>(
+          async (res) => {
+            const displayName = await getEffectiveDisplayName(res, {
+              signal: makeSignal(),
+            });
+            return new Layer(store, {
+              display_name: displayName,
+              layer_style_id: res.id,
+            });
+          },
+          {
+            title: msgLayer,
+            pickerOptions: {
+              requireInterface: "IRenderableStyle",
+              multiple: true,
+            },
+          }
+        ),
+        action.addItem<ItemObject, Group>(
+          () =>
+            new Group(store, {
+              display_name: gettext(msgGroup),
+            }),
+          {
+            key: "add_group",
+            title: msgGroup,
+          }
+        ),
+        (context: ItemObject | null): FocusTableAction<ItemObject | null>[] => {
+          if (context) return [];
+          return [
+            {
+              key: "draw_order",
+              title: drawOrderEnabled
+                ? msgDrawOrderEdit
+                : msgDrawOrderCustomize,
+              icon: <ReorderIcon />,
+              placement: "left",
+              callback: () => setDrawOrderEdit(true),
+            },
+          ];
+        },
+      ],
+      itemActions: [action.deleteItem<ItemObject>()],
+    }),
+    [drawOrderEnabled, makeSignal, pickToFocusTable, store]
+  );
+
+  return drawOrderEdit ? (
+    <DrawOrderTable store={store} close={() => setDrawOrderEdit(false)} />
+  ) : (
+    <FocusTable<ItemObject>
+      store={store}
+      title={(item) => item.displayName.value}
+      tableActions={tableActions}
+      itemActions={itemActions}
+      renderDetail={({ item }) =>
+        item instanceof Group ? (
+          <GroupWidget item={item} />
+        ) : (
+          <LayerWidget item={item} />
+        )
+      }
+    />
+  );
+});
+
+ItemsWidget.displayName = "ItemsWidget";
+ItemsWidget.title = gettext("Layers");
+ItemsWidget.activateOn = { create: true, update: true };
+ItemsWidget.order = -50;

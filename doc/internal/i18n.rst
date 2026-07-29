@@ -1,0 +1,198 @@
+Internationalization and localization
+=====================================
+
+Internationalization and localization of NextGIS Web is built on top of
+`gettext`_ and `babel`_ libraries. The workflow for working with messages is
+standard for projects based on gettext:
+
+.. _gettext: http://www.gnu.org/software/gettext
+.. _babel: http://babel.pocoo.org/
+
+1. Extract messages to translate from sources to ``.pot`` file (``extract``)
+2. Create or update ``.po`` files from ``.pot`` files (``update``)
+3. Compile ``.po`` files into ``.mo`` files (``compile``)
+
+Each NextGIS Web component becomes an independent domain in terms of the gettext
+library. As a result, there is no way to internationalize messages that do not
+belong to any component.
+
+To be able to extract messages for translation, they must be marked up
+appropriately. Below is described how to do this, as well as how to ensure the
+display of already translated messages.
+
+All operations on messages are performed using the ``nextgisweb-i18n`` command
+line utility. To update translation in ``nextgisweb_foo`` you can do the
+following:
+
+.. code-block:: bash
+
+  $ nextgisweb-i18n update --locale ru nextgisweb_foo
+  $ nano package/nextgisweb_foo/nextgisweb_foo/locale/ru.po
+  $ nextgisweb-i18n compile nextgisweb_foo
+
+The following standard `gettext`-like functions are supported for backend and
+frontend:
+
+- ``gettext(message)``
+- ``ngettext(singular, plural, n)``
+- ``pgettext(context, message)``
+- ``npgettext(context, singular, plural, n)``
+
+In addition, each of these functions has a formatter variant with the ``f``
+suffix: ``gettextf``, ``ngettextf``, ``pgettextf`` and ``npgettextf``. They
+return callables that perform string interpolation using Python string format
+placeholders. For example:
+
+.. code-block:: python
+
+  >>> print(gettextf("Hello, {}!")("Arthur"))
+  Hello, Arthur!
+
+Template strings may contain one of the following:
+
+- One anonymous placeholder: ``Hello, {}!``
+- Named placeholders: ``Hello, {first} {last}!``
+- Index-based placeholders: ``Hello, {0} {1}!``
+
+
+Server side
+-----------
+
+Python
+^^^^^^
+
+Since Python code is executed on a server, the same application instance must be
+able to serve users with different locales, it is necessary to use a two-step
+work with messages: first, a message is marked as requiring translation, then
+before displaying it to the user, it's translated according to the user's
+preferences.
+
+.. code-block:: python
+
+  from nextgisweb.env import gettext
+
+  @view_config(renderer='json')
+  def view(request):
+      tr = request.localizer.translate
+      return tr(gettext("Some message for translation"))
+
+.. note::
+
+  Formatting with ``gettext("Hello, {}!").format("Arthur")`` and
+  ``gettext("Hello, %s!") % "Arthur"`` works but deprecated.
+
+.. note::
+
+  Python formatting modifiers are not supported. To format numbers, convert
+  arguments to a string first.
+
+Some formatting examples:
+
+.. code-block:: python
+
+  from nextgisweb.env import gettextf
+
+  def user_info_message(tr, user):
+      return tr(gettextf("Your login is {kn} and full name is {dn}.")(
+          kn=user.keyname, dn=user.display_name
+      ))
+
+  def percent_left_message(tr, percent):
+      return tr(gettextf("{} left.")("{:.2f}%".format(percent)))
+
+Mako
+^^^^
+
+Some of the strings that require translation are also contained in Mako
+templates. In fact, the work of mako templates is not much different from
+Python. You don't need import anything as it's imported behind the scene.
+Consider the following example:
+
+.. code-block:: mako
+
+  <div>
+      ${tr(gettext("Another message for translation"))}
+  </div>
+
+.. note:: 
+
+  Unfortunately, it isn't possible use this function as a modifier
+  ``${expression | tr}``. In this case, the result of the standard modifier
+  ``n``, that is ``markupsafe.Markup`` gets into the function.
+
+In order to track that all strings requiring translation were translated when
+outputting in the template in debug mode (setting ``debug`` of the component
+``core``) a special modifier is added to the standard modifier ``n``, which
+checks whether the translation was performed using ``request.localizer`` and if
+not, then the corresponding warning is displayed in the log.
+
+Client side
+-----------
+
+When executing client-side code, user preferences are already known and there is
+no need for two-step processing. Translation and marking strings for translation
+are combined into one function.
+
+JavaScript and TypeScript
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Simple messages with ``gettext``:
+
+.. code-block:: javascript
+
+  import { gettext } from "@nextgisweb/pyramid/i18n";
+  
+  const msgTranslated = gettext("Some message for translation");
+  console.log("Localized message: " + msgTranslated);
+
+Some formatting examples: 
+
+.. code-block:: javascript
+
+  import { gettextf } from "@nextgisweb/pyramid/i18n";
+
+  const msgHelloFmt = gettextf("Hello, dear {}!");
+  const msgFromToFmt = gettext("A message from {from} to {to}.")
+
+  function sayHello(name) {
+      const msgTranslated = msgHelloFmt(name);
+      console.log("Localized message: " + msgTranslated);
+  };
+
+  function noteTitle(sender, receiver) {
+      return msgFromToFmt({from: sender, to: receiver});
+  };
+
+Formatted messages with plural can be translated with ``ngettextf``:
+
+.. code-block:: javascript
+
+  import { ngettextf } from "@nextgisweb/pyramid/i18n";
+
+  function countSheepAndWolves(sheep, wolves) {
+      const msgSheep = ngettextf("{} sheep.", "{} sheep", sheep)(sheep);
+      const msgWolves = ngettextf("{} wolf", "{} wolves", wolves)(wolves);
+
+      console.log(msgSheep);
+      console.log(msgWolves);
+  }
+
+You can translate React elements with ``Translated``:
+
+.. code-block:: javascript
+
+  import { gettextf } from "@nextgisweb/pyramid/i18n";
+  import { Translated } from "@nextgisweb/pyramid/i18n/translated";
+
+  import { OpenInNewIcon } from "@nextgisweb/gui/icon";
+
+  const msgCommandTipFmt = gettextf("For {command} click {icon} icon.");
+
+  function CommandTip({ command }) {
+      return (
+          <Translated
+              msgf={msgCommandTipFmt}
+              args={{ command, icon: <OpenInNewIcon /> }}
+          />
+      );
+  }

@@ -1,0 +1,13 @@
+{
+  "name": "@nextgisweb/stylesheet",
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@fontsource/roboto": "^5.2.10"
+  },
+  "nextgisweb": {
+    "rsbuildConfigs": {
+      "stylesheet": "rsbuild.stylesheet.ts"
+    }
+  }
+}

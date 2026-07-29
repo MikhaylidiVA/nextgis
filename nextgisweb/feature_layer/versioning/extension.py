@@ -1,0 +1,978 @@
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from functools import cached_property, partial
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, Self, Type, cast
+
+import sqlalchemy as sa
+import sqlalchemy.dialects.postgresql as sa_pg
+import sqlalchemy.orm as orm
+from msgspec import Struct
+from sqlalchemy import event, inspect
+from sqlalchemy.sql import and_ as sql_and
+from sqlalchemy.sql import or_ as sql_or
+
+from nextgisweb.env import DBSession
+
+from ..interface import IVersionableFeatureLayer
+from .exception import VersioningContextRequired
+from .model import ActColValue, FVersioningMeta, FVersioningObj
+
+if TYPE_CHECKING:
+    cached_query = cached_property
+else:
+
+    def cached_query(func):
+        result = cached_property(func)
+        result._cached_query = True
+        return result
+
+
+class VersioningTables(NamedTuple):
+    ct: sa.Table
+    et: sa.Table
+    ht: sa.Table
+
+
+class ExtensionQueries:
+    p_rid = sa.bindparam("p_rid", type_=sa.Integer())
+    p_sid = sa.bindparam("p_sid", type_=sa.Integer())
+    p_fid = sa.bindparam("p_fid", type_=sa.Integer())
+    p_eid = sa.bindparam("p_eid", type_=sa.Integer())
+
+    # Current version and operation
+    p_vid = sa.bindparam("p_vid", type_=sa.Integer())
+
+    # Previous version and operation
+    p_pid = sa.bindparam("p_pid", type_=sa.Integer())
+    p_pop = sa.bindparam("p_pop", type_=sa.String(1))
+
+    # Initial and target versions for changes
+    p_initial = sa.bindparam("p_initial", type_=sa.Integer())
+    p_target = sa.bindparam("p_target", type_=sa.Integer())
+
+    # Last obtained ID and limits for changed FIDs
+    p_fid_last = sa.bindparam("p_fid_last", type_=sa.Integer())
+    p_fid_min = sa.bindparam("p_fid_min", type_=sa.Integer())
+    p_fid_max = sa.bindparam("p_fid_max", type_=sa.Integer())
+    p_fid_limit = sa.bindparam("p_fid_limit", type_=sa.Integer())
+
+    def __init__(self, mapper: Type[FVersioningExtensionMixin]):
+        self.mapper = mapper
+        self.has_id = hasattr(mapper, "extension_id")
+        self.cols = mapper.fversioning_columns
+        self.tables = VersioningTables(
+            mapper.__table__,
+            mapper.fversioning_etab,
+            mapper.fversioning_htab,
+        )
+
+    @cached_query
+    def get(self):
+        return sa.select(self.mapper).where(
+            self.mapper.resource_id == self.p_rid,
+            self.mapper.feature_id == self.p_fid,
+            *((self.mapper.extension_id == self.p_eid,) if self.has_id else ()),
+        )
+
+    @cached_query
+    def after_insert(self):
+        values = dict()
+        if self.has_id:
+            values["extension_id"] = self.p_eid
+        values["resource_id"] = self.p_rid
+        values["feature_id"] = self.p_fid
+        values["version_id"] = self.p_vid
+        values["version_op"] = sa.bindparam("p_vop", "C")
+        return self.tables.et.insert().values(values)
+
+    @cached_query
+    def before_update(self):
+        return self.__update_delete_query("U")
+
+    @cached_query
+    def before_delete(self):
+        return self.__update_delete_query("D")
+
+    @cached_query
+    def before_restore(self):
+        et, ht = self._aliased_tables[1:]
+
+        qet = (
+            sa.select(
+                et.c.feature_id,
+                (et.c.extension_id if self.has_id else sa.null().label("extension_id")),
+                et.c.version_id,
+            )
+            .where(
+                et.c.resource_id == self.p_rid,
+                et.c.feature_id == self.p_fid,
+                et.c.extension_id == self.p_eid if self.has_id else sa.true(),
+                et.c.version_op == sa.text("'D'"),
+            )
+            .cte("qet")
+        )
+
+        eir = sa.func.int4range(qet.c.version_id.op("-")(sa.text("1")), qet.c.version_id)
+        sht = sa.select(
+            ht.c.feature_id,
+            (ht.c.extension_id if self.has_id else sa.null().label("extension_id")),
+            ht.c.version_nid,
+            ht.c.version_nop,
+            *(ht.c[c] for c in self.cols),
+        ).where(
+            ht.c.resource_id == self.p_rid,
+            ht.c.feature_id == qet.c.feature_id,
+            (ht.c.extension_id == qet.c.extension_id if self.has_id else sa.true()),
+            self.version_range(ht).op("&&")(eir),
+        )
+
+        return sht
+
+    @cached_query
+    def after_restore(self):
+        et, ht = self.tables[1:]
+
+        extension_id = dict(extension_id=self.p_eid) if self.has_id else dict()
+        values_ht = dict(
+            resource_id=self.p_rid,
+            feature_id=self.p_fid,
+            **extension_id,
+            version_id=self.p_pid,
+            version_op=self.p_pop,
+            version_nid=self.p_vid,
+            version_nop=sa.text("'R'"),
+        )
+
+        iht = sa.insert(ht).values(values_ht)
+        iht = iht.returning(ht.c.feature_id).cte("iht")
+
+        uet = (
+            sa.update(et)
+            .values(dict(version_id=self.p_vid, version_op=sa.text("'R'")))
+            .where(et.c.resource_id == self.p_rid, et.c.feature_id == iht.c.feature_id)
+        )
+
+        if self.has_id:
+            uet = uet.where(et.c.extension_id == self.p_eid)
+
+        return uet
+
+    @cached_query
+    def delete_ctab(self):
+        return self.__update_delete_query("O")
+
+    @cached_query
+    def initfill(self):
+        ct, et, _ = self.tables
+        cs = sa.select().where(ct.c.resource_id == self.p_rid)
+        cols = ["resource_id", "feature_id", "version_id", "version_op"]
+        if self.has_id:
+            cs = cs.add_columns(ct.c.extension_id)
+            cols.insert(0, "extension_id")
+        cs = cs.add_columns(ct.c.resource_id, ct.c.feature_id)
+        cs = cs.add_columns(self.p_vid, sa.bindparam("p_vop", "E"))
+        return sa.insert(et).from_select(cols, cs)
+
+    @cached_query
+    def revert(self):
+        et, ht = self._aliased_tables[1:]
+        present_op = lambda t: t.c.version_op.not_in(sa.text("('D', 'O')"))
+        q = (
+            sa.select(
+                et.c.feature_id,
+                (et.c.extension_id if self.has_id else sa.null()).label("extension_id"),
+                present_op(et).label("current"),
+                sa.func.coalesce(present_op(ht), sa.false()).label("previous"),
+                et.c.version_id,
+                et.c.version_op,
+                *(ht.c[c] for c in self.cols),
+            )
+            .where(et.c.resource_id == self.p_rid, et.c.version_id > self.p_vid)
+            .select_from(et)
+            .join(
+                ht,
+                sa.and_(
+                    ht.c.resource_id == et.c.resource_id,
+                    ht.c.feature_id == et.c.feature_id,
+                    ht.c.extension_id == et.c.extension_id if self.has_id else sa.true(),
+                    self.version_range(ht).op("@>", precedence=4)(self.p_vid),
+                ),
+                isouter=True,
+            )
+            .subquery("sub")
+        )
+
+        return sa.select(
+            q.c.feature_id,
+            q.c.extension_id,
+            q.c.current,
+            q.c.previous,
+            q.c.version_id,
+            q.c.version_op,
+            *(q.c[c] for c in self.cols),
+        ).where(sa.text("current != previous OR (current AND previous)"))
+
+    @cached_query
+    def copy_ctab(self):
+        ct = self.tables.ct
+        extra = self.mapper.fversioning_extra
+        return sa.insert(ct).from_select(
+            (
+                "resource_id",
+                "feature_id",
+                *(("extension_id",) if self.has_id else ()),
+                *self.cols,
+                *extra.keys(),
+            ),
+            sa.select(
+                self.p_rid.label("resource_id"),
+                ct.c.feature_id,
+                *((ct.c.extension_id,) if self.has_id else ()),
+                *(ct.c[c] for c in self.cols),
+                *extra.values(),
+            ).where(ct.c.resource_id == self.p_sid),
+        )
+
+    @cached_query
+    def copy_pit(self):
+        ct = self.tables.ct
+        pit = self.__pit_query(rid=self.p_sid, fid=False).subquery("pit")
+        extra = self.mapper.fversioning_extra
+        return sa.insert(ct).from_select(
+            (
+                "resource_id",
+                "feature_id",
+                *(("extension_id",) if self.has_id else ()),
+                *self.cols,
+                *extra.keys(),
+            ),
+            sa.select(
+                self.p_rid.label("resource_id"),
+                pit.c.feature_id,
+                *((pit.c.extension_id,) if self.has_id else ()),
+                *(pit.c[c] for c in self.cols),
+                *extra.values(),
+            ),
+            include_defaults=False,
+        )
+
+    @cached_query
+    def feature_pit(self):
+        return self.__pit_query(rid=self.p_rid, fid=True)
+
+    @cached_query
+    def feature_vid(self):
+        _, et, _ = self._aliased_tables
+        return sa.select(et.c.version_id.label("vid")).where(
+            et.c.resource_id == self.p_rid,
+            et.c.feature_id == self.p_fid,
+            *((et.c.extension_id == self.p_eid,) if self.has_id else ()),
+        )
+
+    @cached_query
+    def changed_fids(self):
+        result = []
+        for t in self._aliased_tables[1:]:
+            query = (
+                sa.select(t.c.feature_id.distinct().label("fid"))
+                .where(
+                    t.c.resource_id == self.p_rid,
+                    t.c.version_id > self.p_initial,
+                    t.c.version_id <= self.p_target,
+                    sql_or(self.p_fid_last.is_(None), t.c.feature_id > self.p_fid_last),
+                )
+                .order_by(t.c.feature_id)
+                .limit(self.p_fid_limit)
+            )
+            result.append(query)
+        return tuple(result)
+
+    @cached_query
+    def changes(self):
+        ct, et, ht = self._aliased_tables
+        lc = sa.literal_column
+
+        hcolumns = lambda s: (
+            (s.c.feature_id.label("fid"),)
+            + ((s.c.extension_id.label("eid"),) if self.has_id else ())
+            + (s.c.version_id.label("vid"),)
+        )
+
+        where_resource = lambda s: self.resource_range(s).op("@>", precedence=4)(self.p_rid)
+        where_range = lc("int4range(version_id, version_nid)").op("@>", precedence=4)
+        where_fid = lambda s: (s.c.feature_id >= self.p_fid_min, s.c.feature_id <= self.p_fid_max)
+
+        # Initial version (without etab)
+        qi = (
+            sa.select(
+                *hcolumns(ht),
+                ht.c.version_op.op("=")(sa.text("'D'")).label("deleted"),
+                *(ht.c[c] for c in self.cols),
+            )
+            .where(where_resource(ht), where_range(self.p_initial), *where_fid(ht))
+            .subquery("qi")
+        )
+
+        # Target version
+        qt = sa.union_all(
+            sa.select(
+                *hcolumns(et),
+                ct.c.feature_id.is_(None).label("deleted"),
+                *(ct.c[c] for c in self.cols),
+            )
+            .join(
+                ct,
+                sa.and_(
+                    ct.c.resource_id == self.p_rid,
+                    ct.c.feature_id == et.c.feature_id,
+                    *([ct.c.extension_id == et.c.extension_id] if self.has_id else ()),
+                ),
+                isouter=True,
+            )
+            .where(
+                et.c.resource_id == self.p_rid,
+                et.c.version_id > self.p_initial,
+                et.c.version_id <= self.p_target,
+                *where_fid(et),
+            ),
+            sa.select(
+                *hcolumns(ht),
+                ht.c.version_op.op("=")(sa.text("'D'")).label("deleted"),
+                *(ht.c[c] for c in self.cols),
+            ).where(where_resource(ht), where_range(self.p_target), *where_fid(ht)),
+        ).subquery("qt")
+
+        lat_pr = sa.select(
+            lc("qi.fid IS NOT NULL AND NOT qi.deleted").label("pi"),
+            lc("qi.fid IS NOT NULL AND qi.deleted").label("di"),
+            lc("qt.fid IS NOT NULL AND NOT qt.deleted").label("pt"),
+        ).lateral("lat_pr")
+
+        tpl_sc = "pt AND (NOT pi OR qt.{0} IS DISTINCT FROM qi.{0})"
+        lat_sc = sa.select(*(lc(tpl_sc.format(c)).label(f"sc_{c}") for c in self.cols))
+        lat_sc = lat_sc.lateral("lat_sc")
+
+        lat_up = sa.select(lc(" OR ".join(f"sc_{c}" for c in self.cols)).label("up"))
+        lat_up = lat_up.lateral("lat_up")
+
+        tpl_sg = "CASE WHEN sc_{0} THEN qt.{0} END"
+        tpl_sc = "CASE WHEN sc_{0} THEN '1' ELSE '0' END"
+        q = sa.select(
+            lc(
+                "CASE "
+                "WHEN NOT pi AND pt AND NOT di THEN 'C' "
+                "WHEN pi AND pt AND up THEN 'U' "
+                "WHEN pi AND NOT pt THEN 'D' "
+                "WHEN NOT pi AND pt AND di THEN 'R' "
+                "END"
+            ).label("action"),
+            lc("COALESCE(qi.fid, qt.fid)").label("fid"),
+            (lc("COALESCE(qi.eid, qt.eid)") if self.has_id else sa.null()).label("eid"),
+            lc("qt.vid").label("vid"),
+            lc(f"CONCAT({', '.join(tpl_sc.format(c) for c in self.cols)})").label("sc"),
+            *(lc(tpl_sg.format(c)).label(c) for c in self.cols),
+        ).where(sa.text("pi != pt OR up"))
+
+        q = q.order_by(
+            lc("COALESCE(qi.fid, qt.fid)").asc(),
+            *((lc("COALESCE(qi.eid, qt.eid)").asc(),) if self.has_id else ()),
+        )
+
+        it_join = [qi.c.fid == qt.c.fid] + ([qi.c.eid == qt.c.eid] if self.has_id else [])
+        q = q.select_from(
+            qi.join(qt, sql_and(*it_join), full=True)
+            .join(lat_pr, sa.text("TRUE"))
+            .join(lat_sc, sa.text("TRUE"))
+            .join(lat_up, sa.text("TRUE"))
+        )
+
+        for sc_idx, c in enumerate(q.selected_columns):
+            if c.name == "sc":
+                break
+        else:
+            raise ValueError
+
+        q.row_sig_values = lambda row: {
+            self.cols[bidx]: row[sc_idx + bidx + 1]
+            for bidx, bit in enumerate(row[sc_idx])
+            if bit == "1"
+        }
+
+        return q
+
+    @cached_property
+    def _aliased_tables(self):
+        ct, et, ht = self.tables
+        return (ct.alias("ct"), et.alias("et"), ht.alias("ht"))
+
+    @staticmethod
+    def resource_range(table):
+        return sa.func.int4range(table.c.resource_id, table.c.resource_id, sa.text("'[]'"))
+
+    @staticmethod
+    def feature_range(table):
+        return sa.func.int4range(table.c.feature_id, table.c.feature_id, sa.text("'[]'"))
+
+    @staticmethod
+    def version_range(table):
+        return sa.func.int4range(table.c.version_id, table.c.version_nid)
+
+    def __update_delete_query(self, vop: Literal["U", "D", "O"]):
+        ct, et, ht = self.tables
+        trailer = sa.literal_column(", ".join(self.cols))
+
+        default_vop = "U" if vop == "U" else "D"
+        p_vop = sa.bindparam("p_vop", default_vop)
+
+        returning = lambda s: (s.c.resource_id, s.c.feature_id)
+        join_on = lambda f, t: (
+            t.c.resource_id == f.c.resource_id,
+            t.c.feature_id == f.c.feature_id,
+        )
+
+        if self.has_id:
+            returning = lambda s, ref=returning: (
+                ref(s) + (s.c.extension_id if s == ct else s.c.extension_id,)
+            )
+            join_on = lambda f, t, ref=join_on: (
+                ref(f, t)
+                + (
+                    (t.c.extension_id if t == ct else t.c.extension_id)
+                    == (f.c.extension_id if f == ct else f.c.extension_id),
+                )
+            )
+
+        cs = sa.select()
+        if self.has_id:
+            cs = cs.add_columns(et.c.extension_id)
+            cs = cs.where(ct.c.extension_id == et.c.extension_id)
+            if vop != "O":
+                cs = cs.where(et.c.extension_id == self.p_eid)
+        cs = cs.add_columns(et.c.resource_id, et.c.feature_id, et.c.version_id, et.c.version_op)
+        cs = cs.add_columns(self.p_vid.label("version_nid"), p_vop.label("version_nop"), trailer)
+
+        cs = cs.where(
+            et.c.resource_id == self.p_rid,
+            et.c.feature_id == self.p_fid,
+            ct.c.resource_id == et.c.resource_id,
+            ct.c.feature_id == et.c.feature_id,
+        ).cte("cs")
+
+        hi = sa.insert(ht).from_select(
+            [
+                *(["extension_id"] if self.has_id else []),
+                "resource_id",
+                "feature_id",
+                "version_id",
+                "version_op",
+                "version_nid",
+                "version_nop",
+                *self.cols,
+            ],
+            cs,
+        )
+
+        eq = sa.update(et).values(version_id=self.p_vid, version_op=p_vop)
+
+        hi = hi.returning(*returning(ht)).cte("hi")
+        eq = eq.where(*join_on(hi, et)).returning(*returning(et))
+
+        if vop != "O":
+            return eq
+
+        eq = eq.cte("eq")
+        dc = sa.delete(ct).where(*join_on(ct, eq))
+        dc = dc.returning(*returning(ct))
+        return dc
+
+    def __pit_query(self, *, rid: sa.BindParameter, fid: bool):
+        ct, et, ht = self._aliased_tables
+        qh = sa.select(
+            ht.c.feature_id,
+            *((ht.c.extension_id,) if self.has_id else ()),
+            ht.c.version_id,
+            *(ht.c[c] for c in self.cols),
+        ).where(
+            self.resource_range(ht).op("@>", precedence=4)(rid),
+            self.version_range(ht).op("@>", precedence=4)(self.p_vid),
+            self.feature_range(ht).op("@>", precedence=4)(self.p_fid) if fid else sa.true(),
+        )
+
+        qe = sa.select(
+            et.c.feature_id,
+            *((et.c.extension_id,) if self.has_id else ()),
+            et.c.version_id,
+            *(ct.c[c] for c in self.cols),
+        ).where(
+            et.c.resource_id == rid,
+            et.c.feature_id == self.p_fid if fid else sa.true(),
+            et.c.version_id <= self.p_vid,
+        )
+        qe = qe.join(
+            ct,
+            sa.and_(
+                ct.c.resource_id == et.c.resource_id,
+                ct.c.feature_id == et.c.feature_id,
+                (ct.c.extension_id == et.c.extension_id)
+                if self.has_id
+                else (ct.c.resource_id == et.c.resource_id),
+            ),
+            isouter=True,
+        )
+        query = sa.union_all(qh, qe)
+        return query
+
+
+class FVersioningExtensionMixin:
+    fversioning_registry: ClassVar[dict[str, Type[FVersioningExtensionMixin]]] = dict()
+
+    # Class attributes, descendants must define them
+    fversioning_metadata_version: ClassVar[int]
+    fversioning_extension: ClassVar[str]
+    fversioning_columns: ClassVar[Sequence[str]]
+    fversioning_extra: ClassVar[Mapping[str, Any]] = dict()
+    fversioning_htab_args: ClassVar[Sequence[Any]] = tuple()
+
+    # Instance attributes, used internaly
+    fversioning_vobj: FVersioningObj | None = None
+    fversioning_initializing: bool
+    fversioning_restored: tuple[int, str]
+
+    def __init_subclass__(cls) -> None:
+        cls.fversioning_registry[cls.fversioning_extension] = cls
+
+        event.listen(cls, "mapper_configured", cls.__mapper_configured)
+        event.listen(cls, "init", cls.__instance_init)
+        event.listen(cls, "load", cls.__instance_load)
+        event.listen(cls, "after_insert", partial(cls.__mapper_hook, hook="after_insert"))
+        event.listen(cls, "before_update", partial(cls.__mapper_hook, hook="before_update"))
+        event.listen(cls, "before_delete", partial(cls.__mapper_hook, hook="before_delete"))
+
+    def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls)
+        instance.fversioning_initializing = True
+        return instance
+
+    def delete(self):
+        if not (session := sa.inspect(self).session):
+            raise VersioningContextRequired
+
+        session.delete(self)
+        resource = self.resource
+        if not IVersionableFeatureLayer.providedBy(resource) or not resource.fversioning:
+            return
+
+        self.fversioning_track(resource)
+
+    @classmethod
+    def restore(cls, resource, feature_id: int, id: int | None = None):
+        if not (session := sa.inspect(resource).session):
+            raise VersioningContextRequired
+
+        params = dict[str, Any](p_rid=resource.id, p_fid=feature_id)
+        if cls.fversioning_has_id:
+            params["p_eid"] = id
+
+        query = cls.fversioning_queries.before_restore
+        row = session.execute(query, params).one()
+
+        obj = cls(
+            resource=resource,
+            feature_id=feature_id,
+            **({"extension_id": id} if cls.fversioning_has_id else {}),
+            **{c: getattr(row, c) for c in cls.fversioning_columns},
+        )
+
+        obj.fversioning_restored = (row.version_nid, row.version_nop)
+        obj.fversioning_track(resource)
+        session.add(obj)
+
+        return obj
+
+    @classmethod
+    def fversioning_get(
+        cls,
+        resource,
+        feature_id: int,
+        id: int | None = None,
+        *,
+        session: orm.Session,
+    ) -> Self | None:
+        params = dict[str, Any](p_rid=resource.id, p_fid=feature_id)
+        assert (id is not None) if cls.fversioning_has_id else id is None
+        if cls.fversioning_has_id:
+            params["p_eid"] = id
+
+        query = cls.fversioning_queries.get
+        obj = session.execute(query, params).scalar_one_or_none()
+        return cast(Self, obj) if obj else None
+
+    @classmethod
+    def fversioning_revert_layer(cls, resource, version: int):
+        session = sa.inspect(resource).session
+        assert session is not None
+
+        query = cls.fversioning_queries.revert
+        params = dict(p_rid=resource.id, p_vid=version)
+
+        result = False
+
+        for row in session.execute(query, params):
+            if not row.current and row.previous:
+                obj = cls(
+                    resource=resource,
+                    resource_id=resource.id,
+                    feature_id=row.feature_id,
+                    **({"extension_id": row.extension_id} if cls.fversioning_has_id else {}),
+                    **{c: getattr(row, c) for c in cls.fversioning_columns},
+                )
+
+                obj.fversioning_restored = (row.version_id, row.version_op)
+                obj.fversioning_track(resource)
+                obj.fversioning_on_revert()
+                session.add(obj)
+                result = True
+            else:
+                obj = cls.fversioning_get(
+                    resource,
+                    row.feature_id,
+                    row.extension_id,
+                    session=session,
+                )
+                assert obj is not None
+
+                if row.current and not row.previous:
+                    obj.delete()
+                    result = True
+                else:
+                    obj_result = False
+                    for c in cls.fversioning_columns:
+                        cval = getattr(row, c)
+                        if getattr(obj, c) != cval:
+                            setattr(obj, c, cval)
+                            obj_result = True
+                    if obj_result:
+                        obj.fversioning_track(resource)
+                        obj.fversioning_on_revert()
+                        result = True
+
+        return result
+
+    @classmethod
+    def fversioning_copy(cls, source, dest, *, version: int | None = None) -> bool:
+        session = sa.inspect(source).session
+        assert session is not None
+
+        if version is None:
+            qres = session.execute(
+                cls.fversioning_queries.copy_ctab,
+                dict(p_sid=source.id, p_rid=dest.id),
+            )
+        else:
+            qres = session.execute(
+                cls.fversioning_queries.copy_pit,
+                dict(p_sid=source.id, p_rid=dest.id, p_vid=version),
+            )
+
+        result = qres.rowcount > 0
+        if result and (vobj := dest.fversioning_vobj):
+            vid = vobj.version_id
+            assert vid == 1
+            session.execute(
+                cls.fversioning_queries.initfill,
+                dict(p_rid=dest.id, p_vid=vid, p_vop="E"),
+            )
+            vobj.mark_changed()
+
+        return result
+
+    def fversioning_on_revert(self):
+        pass
+
+    def fversioning_track(self, resource):
+        if (vobj := resource.fversioning_vobj) is None:
+            raise VersioningContextRequired
+
+        self.fversioning_vobj = vobj
+        vobj.mark_changed()
+
+    @classmethod
+    def fversioning_vid(cls, resource, fid: int, eid: int | None = None) -> int:
+        if cls.fversioning_has_id and eid is None:
+            raise ValueError(f"eid is required for {cls.__name__}")
+
+        session = sa.inspect(resource).session
+        if not session:
+            raise VersioningContextRequired
+
+        params = dict(p_rid=resource.id, p_fid=fid)
+        if eid is not None:
+            params["p_eid"] = eid
+
+        query = cls.fversioning_queries.feature_vid
+        row = session.execute(query, params).one_or_none()
+        return row.vid if row else 0
+
+    @classmethod
+    def fversioning_changed_fids(cls):
+        return cls.fversioning_queries.changed_fids
+
+    @classmethod
+    def fversioning_changes(cls, resource, *, initial, target, fid_min, fid_max):
+        initial = initial or 0
+
+        query = cls.fversioning_queries.changes
+        row_sig_values = query.row_sig_values
+
+        qresult = DBSession.execute(
+            query,
+            dict(
+                p_rid=resource.id,
+                p_initial=initial,
+                p_target=target,
+                p_fid_min=fid_min,
+                p_fid_max=fid_max,
+            ),
+        )
+
+        for row in qresult:
+            yield cls.fversioning_change_from_query(*row[:4], row_sig_values(row))
+
+    @classmethod
+    def fversioning_change_from_query(
+        cls,
+        action: ActColValue,
+        fid: int,
+        eid: None,
+        vid: int,
+        values: dict[str, Any],
+    ) -> Type[Struct]:
+        raise NotImplementedError
+
+    @classmethod
+    def __setup_metadata(cls):
+        assert cls.fversioning_metadata_version == 1
+
+        prefix = cls.__tablename__
+        metadata = cls.metadata
+        cls.fversioning_has_id = hasattr(cls, "extension_id")
+
+        cls.fversioning_etab = sa.Table(
+            *(f"{prefix}_et", metadata),
+            cls.__resource_id_column(),
+            cls.__feature_id_column(),
+            *cls.__extension_id_column_as_list(),
+            cls.__version_id_column(next=False),
+            cls.__version_op_column(next=False),
+            cls.__version_fkey(prefix, "et", next=False),
+            sa.Index(
+                f"{prefix}_et_resource_id_version_id_feature_id_idx",
+                "resource_id",
+                "version_id",
+                "feature_id",
+            ),
+        )
+
+        data_columns = [
+            sa.Column(c.name, c.type, key=c.key, nullable=True)
+            for c in cls.__table__.columns
+            if c.key in cls.fversioning_columns
+        ]
+
+        cls.fversioning_cols = tuple(c.name for c in data_columns)
+
+        cls.fversioning_htab = sa.Table(
+            *(f"{prefix}_ht", metadata),
+            cls.__resource_id_column(),
+            cls.__version_id_column(next=False, primary_key=True),
+            cls.__feature_id_column(),
+            *cls.__extension_id_column_as_list(),
+            cls.__version_id_column(next=True),
+            cls.__version_op_column(next=False),
+            cls.__version_op_column(next=True),
+            *data_columns,
+            cls.__version_fkey(prefix, "ht", next=True),
+            *cls.fversioning_htab_args,
+            sa_pg.ExcludeConstraint(
+                (sa.literal_column("int4range(resource_id, resource_id, '[]')"), "&&"),
+                (sa.literal_column("int4range(version_id, version_nid)"), "&&"),
+                (sa.literal_column("int4range(feature_id, feature_id, '[]')"), "&&"),
+                *(
+                    ((sa.literal_column("int4range(extension_id, extension_id, '[]')"), "&&"),)
+                    if cls.fversioning_has_id
+                    else ()
+                ),
+                name=f"{prefix}_ht_range_idx",
+            ),
+        )
+
+    @classmethod
+    def __extension_id_column_as_list(cls):
+        if not cls.fversioning_has_id:
+            return []
+        return [sa.Column("extension_id", sa.Integer, primary_key=True)]
+
+    @classmethod
+    def __resource_id_column(cls, **kwargs):
+        return sa.Column(
+            "resource_id",
+            sa.ForeignKey(
+                FVersioningMeta.resource_id,
+                ondelete="CASCADE",
+                deferrable=True,
+                initially="DEFERRED",
+            ),
+            primary_key=True,
+            **kwargs,
+        )
+
+    @classmethod
+    def __feature_id_column(cls, **kwargs):
+        return sa.Column("feature_id", sa.Integer, primary_key=True, **kwargs)
+
+    @classmethod
+    def __version_id_column(cls, next=False, **kwargs):
+        s = "n" if next else ""
+        return sa.Column(f"version_{s}id", sa.Integer, nullable=False, **kwargs)
+
+    @classmethod
+    def __version_op_column(cls, next=False, **kwargs):
+        s = "n" if next else ""
+        return sa.Column(f"version_{s}op", sa.CHAR(1), nullable=False, **kwargs)
+
+    @classmethod
+    def __version_fkey(cls, prefix, tsuf, next=False):
+        s = "n" if next else ""
+        return sa.ForeignKeyConstraint(
+            ["resource_id", f"version_{s}id"],
+            [FVersioningObj.resource_id, FVersioningObj.version_id],
+            deferrable=True,
+            initially="DEFERRED",
+            name=f"{prefix}_{tsuf}_resource_id_version_{s}id_fkey",
+        )
+
+    # Events
+
+    @classmethod
+    def __instance_init(cls, target, args, kwargs):
+        assert target.fversioning_initializing
+        resource = kwargs["resource"]
+        if not IVersionableFeatureLayer.providedBy(resource) or not resource.fversioning:
+            return
+
+        session = sa.inspect(resource).session
+        if not session or (vobj := resource.fversioning_vobj) is None:
+            raise VersioningContextRequired
+
+        session.add(target)
+        target.fversioning_vobj = vobj
+        vobj.mark_changed()
+        target.fversioning_initializing = False
+
+    @classmethod
+    def __instance_load(cls, target, *args, **kwargs):
+        assert target.fversioning_initializing
+        target.fversioning_initializing = False
+
+    @classmethod
+    def __mapper_configured(cls, *args):
+        cls.__setup_metadata()
+
+        cls.fversioning_queries = ExtensionQueries(cls)
+
+        for col in cls.fversioning_cols:
+            listener = partial(cls.__attribute_set, col=col)
+            event.listen(getattr(cls, col), "set", listener, propagate=True)
+
+    @classmethod
+    def __attribute_set(cls, target, value, oldvalue, initiator, *, col):
+        if target.fversioning_initializing:
+            return
+
+        session = sa.inspect(target).session
+        resource = target.resource
+        assert session and resource
+
+        if (
+            not session._flushing
+            and not target.fversioning_vobj
+            and IVersionableFeatureLayer.providedBy(resource)
+            and resource.fversioning
+        ):
+            target.fversioning_track(resource)
+
+    @classmethod
+    def __mapper_hook(cls, mapper, connection, target, *, hook):
+        if hook == "before_delete" and not target.fversioning_vobj:
+            # Prevent deletion without versioning context
+            insp = inspect(target)
+            assert "resource_id" not in insp.unloaded
+            resource = target.resource
+            assert target.resource
+
+            if (
+                IVersionableFeatureLayer.providedBy(resource)
+                and (fversioning := resource.fversioning) is not None
+            ):
+                deleted = insp.session.deleted
+                if fversioning not in deleted and resource not in deleted:
+                    raise VersioningContextRequired
+
+        if (vobj := target.fversioning_vobj) is None:
+            return
+
+        params = dict()
+        if target.fversioning_has_id:
+            params["p_eid"] = target.extension_id
+
+        params.update(
+            p_rid=target.resource_id,
+            p_fid=target.feature_id,
+            p_vid=vobj.version_id,
+        )
+
+        if r := getattr(target, "fversioning_restored", None):
+            query = target.fversioning_queries.after_restore
+            params.update(p_pid=r[0], p_pop=r[1])
+        elif hook == "after_insert" and not target.fversioning_has_id:
+            # For extensions without extension_id the et PK is (resource_id,
+            # feature_id). If a previously-deleted entry (version_op='D') still
+            # exists in et, a plain INSERT would cause UniqueViolation. Detect
+            # this via before_restore and use the restore flow instead.
+            row = connection.execute(target.fversioning_queries.before_restore, params).first()
+            if row is not None:
+                query = target.fversioning_queries.after_restore
+                params.update(p_pid=row.version_nid, p_pop=row.version_nop)
+            else:
+                query = target.fversioning_queries.after_insert
+        else:
+            query = getattr(target.fversioning_queries, hook)
+
+        connection.execute(query, params)
+        target.fversioning_vobj = None
+
+
+@event.listens_for(FVersioningMeta, "after_insert")
+def _initfill_enabled_extensions(mapper, connection, obj):
+    params = dict(p_rid=obj.resource_id, p_vid=1, p_vop="E")
+    for cls in FVersioningExtensionMixin.fversioning_registry.values():
+        query = cls.fversioning_queries.initfill
+        connection.execute(query, params)
+
+
+@event.listens_for(FVersioningObj, "after_insert")
+@event.listens_for(FVersioningObj, "after_update")
+def _delete_orphaned_feature_extensions(mapper, connection, target: FVersioningObj):
+    params = dict(p_rid=target.resource_id, p_vid=target.version_id, p_vop="O")
+
+    if fids := target.features_deleted:
+        for cls in FVersioningExtensionMixin.fversioning_registry.values():
+            query = cls.fversioning_queries.delete_ctab
+            for fid in fids:
+                connection.execute(query, dict(params, p_fid=fid))
+        fids[:] = []
+
+    # TODO: Restore extensions on feature restore
+
+    target.unflushed_changes = False

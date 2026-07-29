@@ -1,0 +1,49 @@
+from nextgisweb.env import gettext
+
+from nextgisweb.gui import react_renderer
+from nextgisweb.jsrealm import jsentry
+from nextgisweb.resource import ConnectionScope, DataScope, Widget, resource_factory
+
+from .model import PostgisConnection, PostgisLayer
+
+
+class PostgisConnectionWidget(Widget):
+    resource = PostgisConnection
+    operation = ("create", "update")
+    amdmod = jsentry("@nextgisweb/postgis/connection-widget")
+
+
+class PostgisLayerWidget(Widget):
+    resource = PostgisLayer
+    operation = ("create", "update")
+    amdmod = jsentry("@nextgisweb/postgis/layer-widget")
+
+
+def setup_pyramid(comp, config):
+    config.add_route(
+        "postgis.diagnostics_page",
+        r"/resource/{id:uint}/postgis-diagnostics",
+        factory=resource_factory,
+    ).add_view(diagnostics_page, context=PostgisConnection).add_view(
+        diagnostics_page, context=PostgisLayer
+    )
+
+
+@react_renderer("@nextgisweb/postgis/diagnostics-widget")
+def diagnostics_page(request):
+    context = request.context
+
+    if isinstance(context, PostgisConnection):
+        request.resource_permission(ConnectionScope.connect)
+        data = dict(connection=dict(id=context.id))
+    elif isinstance(context, PostgisLayer):
+        request.resource_permission(DataScope.read)
+        data = dict(connection=dict(id=context.connection.id), layer=dict(id=context.id))
+    else:
+        raise ValueError
+
+    return dict(
+        props=dict(data=data),
+        title=gettext("PostGIS diagnostics"),
+        obj=request.context,
+    )

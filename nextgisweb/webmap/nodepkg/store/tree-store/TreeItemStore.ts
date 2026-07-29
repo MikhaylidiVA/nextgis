@@ -1,0 +1,375 @@
+import { action, computed, observable } from "mobx";
+
+import type { FilterExpressionString } from "@nextgisweb/feature-layer/feature-filter/type";
+import type { LegendSymbol } from "@nextgisweb/render/type/api";
+import type { CompositeMembersConfig } from "@nextgisweb/resource/type/api";
+import type { LayerSymbols } from "@nextgisweb/webmap/compat/type";
+import type { TreeChildrenItemConfig } from "@nextgisweb/webmap/type/TreeItems";
+import type {
+  GroupItemConfig,
+  LayerIdentification,
+  LayerItemConfig,
+  LegendInfo,
+} from "@nextgisweb/webmap/type/api";
+import { restoreSymbols } from "@nextgisweb/webmap/utils/symbolsIntervals";
+
+abstract class BaseTreeItemStore {
+  id: number;
+  key: number;
+  type: TreeChildrenItemConfig["type"];
+  @observable.ref accessor parentId: number | null;
+  @observable.ref accessor label: string;
+  @observable.ref accessor title: string;
+
+  // increments automatically whenever any property changes
+  // used to trigger reactive updates in the UI
+  @observable.ref accessor changeStamp = 0;
+
+  // Timestamp of the last sync with the server.
+  @observable.ref accessor lastSyncedAt: number | null = null;
+
+  protected constructor(
+    init: Pick<
+      TreeChildrenItemConfig,
+      "id" | "key" | "type" | "label" | "title"
+    >,
+    parentId: number | null
+  ) {
+    this.parentId = parentId;
+
+    this.id = init.id;
+    this.key = init.key;
+    this.type = init.type;
+    this.label = init.label ?? "";
+    this.title = init.title ?? "";
+  }
+
+  abstract dump(): GroupItemConfig | LayerItemConfig;
+
+  isGroup(): this is TreeGroupStore {
+    return this.type === "group";
+  }
+  isLayer(): this is TreeLayerStore {
+    return this.type === "layer";
+  }
+
+  @action.bound
+  touch() {
+    this.changeStamp += 1;
+  }
+
+  @action
+  setLastSynced(time: number | null = Date.now()) {
+    this.lastSyncedAt = time;
+  }
+
+  @action.bound
+  update(values: Partial<this>): void {
+    let changed = false;
+
+    for (const [key, value] of Object.entries(values)) {
+      const k = key as keyof this;
+      const oldValue = this[k];
+      if (oldValue !== value) {
+        this[k] = value;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.touch();
+    }
+  }
+}
+
+export class LegendInfoStore implements LegendInfo {
+  @observable.ref accessor visible: LegendInfo["visible"];
+  @observable.ref accessor has_legend: LegendInfo["has_legend"];
+
+  @observable.ref accessor symbols: LegendSymbol[] | null = null;
+
+  @observable.ref accessor changeStamp = 0;
+
+  constructor({ visible, has_legend }: LegendInfo) {
+    this.visible = visible;
+    this.has_legend = has_legend;
+  }
+
+  @action.bound
+  load(config: LegendInfo) {
+    this.setVisible(config.visible);
+    this.setHasLegend(config.has_legend);
+  }
+
+  @action.bound
+  protected touch() {
+    this.changeStamp += 1;
+  }
+
+  @action
+  setVisible(val: LegendInfo["visible"]) {
+    if (val !== this.visible) {
+      this.visible = val;
+      this.touch();
+    }
+  }
+  @action
+  setHasLegend(val: boolean) {
+    if (val !== this.has_legend) {
+      this.has_legend = val;
+      this.touch();
+    }
+  }
+
+  @action
+  toggleVisible() {
+    this.setVisible(this.visible === "collapse" ? "expand" : "collapse");
+  }
+
+  @action
+  setSymbols(val: LegendSymbol[] | null) {
+    this.symbols = val;
+    this.touch();
+  }
+
+  @computed
+  get single() {
+    return !!this.symbols && this.symbols.length === 1;
+  }
+  @computed
+  get open() {
+    return !this.single && this.visible === "expand";
+  }
+}
+
+export class TreeLayerStore
+  extends BaseTreeItemStore
+  implements LayerItemConfig
+{
+  static order = 0;
+
+  readonly type: LayerItemConfig["type"] = "layer";
+
+  @observable.ref accessor plugin: CompositeMembersConfig;
+  @observable.ref accessor adapter: string;
+  @observable.ref accessor layerId: number;
+  @observable.ref accessor styleId: number;
+  @observable.ref accessor symbols: LayerSymbols | null = null;
+
+  @observable.ref accessor filterable: boolean;
+  @observable.ref accessor legendInfo: LegendInfoStore;
+  @observable.ref accessor visibility: boolean;
+  @observable.ref accessor identifiable: boolean;
+  @observable.ref accessor transparency: number | null;
+  @observable.ref accessor minScaleDenom: number | null;
+  @observable.ref accessor maxScaleDenom: number | null;
+
+  @observable.ref accessor identification: LayerIdentification | null;
+  @observable.ref accessor drawOrderPosition: number;
+
+  @observable.ref accessor isOutOfScaleRange = false;
+
+  @observable.ref accessor drawOrderEnabled: boolean;
+  @observable.ref accessor filter: FilterExpressionString | null = null;
+
+  @observable.ref accessor minResolution: number | null = null;
+  @observable.ref accessor maxResolution: number | null = null;
+  @observable.ref accessor editable: boolean | null = null;
+
+  constructor(
+    init: LayerItemConfig,
+    parentId: number | null,
+    drawOrderEnabled = false
+  ) {
+    super(init, parentId);
+
+    this.drawOrderEnabled = drawOrderEnabled;
+
+    this.layerId = init.layerId;
+    this.styleId = init.styleId;
+    this.visibility = !!init.visibility;
+    this.identifiable = !!init.identifiable;
+    this.transparency = init.transparency ?? null;
+    this.minScaleDenom = init.minScaleDenom ?? null;
+    this.maxScaleDenom = init.maxScaleDenom ?? null;
+    this.drawOrderPosition =
+      this.drawOrderEnabled && typeof init.drawOrderPosition === "number"
+        ? init.drawOrderPosition
+        : TreeLayerStore.order++;
+    this.filterable = init.filterable;
+    this.legendInfo = new LegendInfoStore(init.legendInfo);
+    this.adapter = init.adapter;
+    this.plugin = init.plugin;
+
+    this.identification = init.identification ?? null;
+  }
+
+  @action.bound
+  load(config: LayerItemConfig) {
+    this.layerId = config.layerId;
+    this.styleId = config.styleId;
+    this.visibility = !!config.visibility;
+    this.identifiable = !!config.identifiable;
+    this.transparency = config.transparency ?? null;
+    this.minScaleDenom = config.minScaleDenom ?? null;
+    this.maxScaleDenom = config.maxScaleDenom ?? null;
+    this.drawOrderPosition =
+      this.drawOrderEnabled && typeof config.drawOrderPosition === "number"
+        ? config.drawOrderPosition
+        : TreeLayerStore.order++;
+    this.filterable = config.filterable;
+    this.adapter = config.adapter;
+    this.plugin = config.plugin;
+    this.identification = config.identification ?? null;
+
+    this.legendInfo.load(config.legendInfo);
+    this.setLastSynced();
+    this.touch();
+  }
+
+  dump(): LayerItemConfig {
+    const legendInfo = {
+      visible: this.legendInfo.visible,
+      has_legend: this.legendInfo.has_legend,
+    } satisfies LegendInfo;
+
+    return {
+      type: "layer",
+      id: this.id,
+      key: this.key,
+      label: this.label,
+      title: this.title,
+
+      layerId: this.layerId,
+      styleId: this.styleId,
+      filterable: this.filterable,
+      visibility: this.visibility,
+      identifiable: this.identifiable,
+      transparency: this.transparency,
+      minScaleDenom: this.minScaleDenom,
+      maxScaleDenom: this.maxScaleDenom,
+      drawOrderPosition: this.drawOrderPosition,
+
+      legendInfo,
+
+      adapter: this.adapter,
+      plugin: this.plugin,
+      identification: this.identification,
+    } satisfies LayerItemConfig;
+  }
+
+  setLayerLegendSymbol = (symbolIndex: number, status: boolean) => {
+    const layerSymbols = this.legendInfo?.symbols;
+    if (layerSymbols) {
+      const symbols: { [symbolIndex: number]: boolean } = {};
+
+      const itemIntervals = this.symbols;
+      if (Array.isArray(itemIntervals)) {
+        const restoredSymbols = restoreSymbols(itemIntervals);
+        for (const layerSymbol of layerSymbols) {
+          symbols[layerSymbol.index] =
+            restoredSymbols[layerSymbol.index] ?? false;
+        }
+      } else if (itemIntervals === "-1") {
+        for (const layerSymbol of layerSymbols) {
+          symbols[layerSymbol.index] = false;
+        }
+      }
+
+      symbols[symbolIndex] = status;
+
+      const renderIndexes: number[] = [];
+      for (const s of layerSymbols) {
+        const render = symbols[s.index] ?? s.render;
+        if (render) {
+          renderIndexes.push(s.index);
+        }
+      }
+      // `-1` - hide layer at all, `null` - use default render without symbols
+      const intervals: LayerSymbols = this._consolidateIntervals(renderIndexes);
+
+      this.setItemSymbols(intervals);
+    }
+  };
+
+  @computed
+  get opacity() {
+    return this.transparency !== null ? 1 - this.transparency / 100 : null;
+  }
+
+  @action
+  setItemSymbols(intervals: string[]) {
+    this.symbols = intervals.length ? intervals : "-1";
+    this.touch();
+  }
+
+  private _consolidateIntervals = (symbols: number[]): string[] => {
+    const sortedSymbols = symbols.slice().sort((a, b) => a - b);
+    const intervals = [];
+    let start = sortedSymbols[0];
+    let end = start;
+
+    for (let i = 1; i <= sortedSymbols.length; i++) {
+      if (sortedSymbols[i] === end + 1) {
+        end = sortedSymbols[i];
+      } else {
+        intervals.push(start === end ? `${start}` : `${start}-${end}`);
+        start = sortedSymbols[i];
+        end = start;
+      }
+    }
+
+    return intervals;
+  };
+}
+
+export class TreeGroupStore
+  extends BaseTreeItemStore
+  implements Omit<GroupItemConfig, "children">
+{
+  type: GroupItemConfig["type"] = "group";
+
+  @observable.ref accessor expanded: boolean;
+  @observable.ref accessor exclusive: boolean;
+  @observable.shallow accessor childrenIds: number[] = [];
+
+  constructor(init: GroupItemConfig, parentId: number | null) {
+    super(init, parentId);
+
+    this.expanded = !!init.expanded;
+    this.exclusive = !!init.exclusive;
+  }
+
+  dump(): GroupItemConfig {
+    return {
+      type: "group",
+      id: this.id,
+      key: this.key,
+      label: this.label,
+      title: this.title,
+      expanded: !!this.expanded,
+      exclusive: !!this.exclusive,
+      children: [],
+    } satisfies GroupItemConfig;
+  }
+
+  @action.bound
+  setChildrenIds(ids: number[]) {
+    this.childrenIds = [...ids];
+    this.touch();
+  }
+}
+
+export type TreeItemStore = TreeGroupStore | TreeLayerStore;
+
+export function createTreeItemStore(
+  init: TreeChildrenItemConfig,
+  parentId: number | null,
+  drawOrderEnabled: boolean
+): TreeItemStore {
+  if (init.type === "layer") {
+    return new TreeLayerStore(init, parentId, drawOrderEnabled);
+  }
+
+  return new TreeGroupStore(init, parentId);
+}

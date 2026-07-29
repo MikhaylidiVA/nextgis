@@ -1,0 +1,127 @@
+import { gettext } from "@nextgisweb/pyramid/i18n";
+import { PRINT_SCALES } from "@nextgisweb/webmap/print-map/utils";
+
+import type { PrintMapSettings } from "../../print-map/type";
+
+import { formatScaleNumber } from "./util";
+
+import {
+  FileImageOutlined,
+  FileJpgOutlined,
+  FilePdfOutlined,
+} from "@ant-design/icons";
+
+const msgPortrait = gettext("Portrait");
+const msgLandscape = gettext("Landscape");
+
+interface PageFormat {
+  label: string;
+  value: string;
+}
+export interface Scale {
+  label: string;
+  value: number;
+}
+
+export const pageFormats: PageFormat[] = [];
+
+export interface LegendColumn {
+  label: string;
+  value: number;
+}
+
+export const legendColumns: LegendColumn[] = Array.from(
+  { length: 5 },
+  (_, i) => ({ label: `${i + 1}`, value: i + 1 })
+);
+
+function addPageFormat(label: string, width: number, height: number) {
+  pageFormats.push({
+    value: `${width}_${height}`,
+    label: `${label} - ${msgPortrait}`,
+  });
+  pageFormats.push({
+    value: `${height}_${width}`,
+    label: `${label} - ${msgLandscape}`,
+  });
+}
+
+addPageFormat("A4", 210, 297);
+addPageFormat("A3", 297, 420);
+pageFormats.push({ value: "custom", label: gettext("Custom size") });
+
+export const scaleToLabel = (scale: number) => {
+  return `1 : ${formatScaleNumber(scale)}`;
+};
+
+export const scalesList: Scale[] = [];
+PRINT_SCALES.forEach((value) => {
+  const label = scaleToLabel(value);
+  scalesList.push({
+    value,
+    label,
+  });
+});
+
+export const exportFormats = [
+  { label: gettext("JPEG"), key: "jpeg", icon: <FileJpgOutlined /> },
+  { label: gettext("PNG"), key: "png", icon: <FileImageOutlined /> },
+  { label: gettext("TIFF"), key: "tiff", icon: <FileImageOutlined /> },
+  { label: gettext("PDF"), key: "pdf", icon: <FilePdfOutlined /> },
+];
+
+const parseNumber = (v: string) => {
+  const parsed = parseInt(v, 10);
+  return isNaN(parsed) ? undefined : parsed;
+};
+
+type SettingKey = keyof PrintMapSettings;
+
+interface PrintParam<T> {
+  setting: SettingKey | undefined;
+  fromParam?: (val: string) => T | undefined;
+  toParam?: (val: T) => string | undefined;
+}
+
+type StringKeyOf<T> = Extract<keyof T, string>;
+
+export type UrlPrintParams<T> = {
+  [K in StringKeyOf<T> as `print_${K}`]: PrintParam<T[K]>;
+};
+
+export const urlPrintParams: UrlPrintParams<PrintMapSettings> = {
+  print_height: {
+    fromParam: parseNumber,
+    setting: "height",
+  },
+  print_width: { fromParam: parseNumber, setting: "width" },
+  print_margin: { fromParam: parseNumber, setting: "margin" },
+  print_scale: { fromParam: parseNumber, setting: "scale" },
+  print_scaleLine: { fromParam: (v) => v === "true", setting: "scaleLine" },
+  print_scaleValue: { fromParam: (v) => v === "true", setting: "scaleValue" },
+  print_center: {
+    fromParam: (centerParam) => {
+      if (!centerParam) return null;
+      const coordStr = decodeURIComponent(centerParam).split(",");
+      return coordStr.map((i) => parseFloat(i));
+    },
+    toParam: (center) => {
+      if (!center) {
+        return;
+      }
+      return center.map((i) => i.toFixed(4)).join(",");
+    },
+    setting: "center",
+  },
+  print_arrow: { fromParam: (v) => v === "true", setting: "arrow" },
+  print_title: { fromParam: (v) => v === "true", setting: "title" },
+  print_titleText: {
+    fromParam: (v) => (v ? decodeURIComponent(v) : ""),
+    toParam: (v) => (v ? encodeURIComponent(v) : ""),
+    setting: "titleText",
+  },
+  print_legend: { fromParam: (v) => v === "true", setting: "legend" },
+  print_graticule: { fromParam: (v) => v === "true", setting: "graticule" },
+  print_legendColumns: { fromParam: parseNumber, setting: "legendColumns" },
+  print_layout: { fromParam: (v) => v, setting: "layout" },
+};

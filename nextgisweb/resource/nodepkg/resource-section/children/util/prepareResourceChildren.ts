@@ -1,0 +1,66 @@
+import { route } from "@nextgisweb/pyramid/api";
+import type { ResourceAttrItem } from "@nextgisweb/resource/api/ResourceAttrItem";
+import { resources } from "@nextgisweb/resource/blueprint";
+
+import type { DefaultResourceSectionAttrs } from "../../type";
+import type { ChildrenResource } from "../type";
+
+export async function prepareResourceChildren({
+  attrItems,
+  signal,
+}: {
+  attrItems: ResourceAttrItem<typeof DefaultResourceSectionAttrs>[];
+  signal: AbortSignal;
+}) {
+  const userNames = new Map<number, string | undefined>();
+
+  for (const it of attrItems) {
+    const userId = it.get("resource.owner_user");
+    if (userId !== undefined) {
+      userNames.set(userId.id, undefined);
+    }
+  }
+
+  await Promise.all(
+    [...userNames.keys()].map(async (id) => {
+      const user = await route("auth.user.item", { id }).get({
+        cache: true,
+        query: { brief: true },
+        signal,
+      });
+      userNames.set(id, user.display_name);
+    })
+  );
+
+  const children: ChildrenResource[] = [];
+  for (const it of attrItems) {
+    const cls = it.get("resource.cls");
+    const displayName = it.get("resource.display_name");
+    const ownerUser = it.get("resource.owner_user");
+    const creationDate = it.get("resource.creation_date");
+
+    const item: ChildrenResource = {
+      cls,
+      resourceId: it.id,
+      displayName,
+      creationDate,
+      clsDisplayName: resources[cls].label,
+      ownerUserDisplayName:
+        ownerUser !== undefined ? userNames.get(ownerUser.id) : `#${ownerUser}`,
+      it,
+    };
+    children.push(item);
+  }
+  children.sort((a, b) => {
+    const orderA = resources[a.cls]?.order ?? 0;
+    const orderB = resources[b.cls]?.order ?? 0;
+
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
+
+    return a.displayName.localeCompare(b.displayName);
+  });
+
+  return children;
+}

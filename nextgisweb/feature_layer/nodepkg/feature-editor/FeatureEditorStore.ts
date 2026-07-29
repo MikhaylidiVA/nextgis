@@ -1,0 +1,291 @@
+import { action, computed, observable } from "mobx";
+
+import type {
+  FeatureLayerFieldRead,
+  FeatureLayerRead,
+} from "@nextgisweb/feature-layer/type/api";
+import { isAbortError } from "@nextgisweb/gui/error";
+import { route } from "@nextgisweb/pyramid/api";
+import type { RouteBody } from "@nextgisweb/pyramid/api/type";
+import { AbortControllerHelper } from "@nextgisweb/pyramid/util/abort";
+import type { CompositeRead } from "@nextgisweb/resource/type/api";
+
+import type { NgwAttributeValue } from "../attribute-editor/type";
+import type {
+  EditorStore,
+  FeatureItemExtensions,
+  FeatureItem as FeatureItem_,
+} from "../type";
+
+import type { FeatureEditorStoreOptions } from "./type";
+
+type FeatureItem = FeatureItem_<NgwAttributeValue>;
+type ExtensionStores = Record<string, EditorStore>;
+
+export class FeatureEditorStore {
+  readonly resourceId: number;
+  readonly featureId: number | null = null;
+
+  @observable.ref accessor saving = false;
+  @observable.ref accessor initLoading = false;
+
+  @observable.shallow accessor fields: FeatureLayerFieldRead[] = [];
+  @observable.shallow accessor featureLayer: FeatureLayerRead | null = null;
+
+  private _featureItem?: FeatureItem;
+
+  private _abortController = new AbortControllerHelper();
+  private _initializing?: Promise<CompositeRead>;
+
+  @observable.shallow private accessor _attributeStore: EditorStore | null =
+    null;
+  @observable.shallow private accessor _geometryStore: EditorStore | null =
+    null;
+  @observable.shallow private accessor _extensionStores: ExtensionStores = {};
+
+  constructor({
+    featureId,
+    resourceId,
+    featureItem,
+  }: FeatureEditorStoreOptions) {
+    this.resourceId = resourceId;
+    if (featureItem) {
+      this.featureId = featureItem.id;
+      this._setFeatureItem(featureItem);
+    } else {
+      this.featureId = featureId;
+    }
+  }
+
+  init() {
+    this.setInitLoading(true);
+    const initializing = this._initialize();
+    this._initializing = initializing;
+    initializing
+      .catch((err) => {
+        if (!isAbortError(err)) {
+          throw err;
+        }
+      })
+      .finally(() => {
+        if (this._initializing === initializing) {
+          this._initializing = undefined;
+          this.setInitLoading(false);
+        }
+      });
+  }
+
+  @computed
+  get dirty(): boolean {
+    const stores = this._getStores();
+
+    return stores.some(({ dirty }) => dirty);
+  }
+
+  async validate(): Promise<boolean> {
+    const stores = this._getStores();
+
+    const results = await Promise.all(
+      stores.map((store) => store.validate?.() ?? true)
+    );
+    return results.every(Boolean);
+  }
+
+  @action
+  setInitLoading(initLoading: boolean): void {
+    this.initLoading = initLoading;
+  }
+  @action
+  setFields(fields: FeatureLayerFieldRead[]): void {
+    this.fields = fields;
+  }
+  @action
+  setFeatureLayer(featureLayer: FeatureLayerRead | null): void {
+    this.featureLayer = featureLayer;
+  }
+  @action
+  setSaving(saving: boolean): void {
+    this.saving = saving;
+  }
+
+  private async _loadResource(signal: AbortSignal) {
+    const resp = await route("resource.item", this.resourceId).get({
+      signal,
+      cache: true,
+    });
+    if (resp) {
+      const fields = resp.feature_layer && resp.feature_layer.fields;
+      if (fields) {
+        this.setFields(fields);
+      }
+      this.setFeatureLayer(resp.feature_layer ?? null);
+    }
+    return resp;
+  }
+
+  private async _loadFeatureItem(signal: AbortSignal) {
+    if (typeof this.featureId !== "number") return;
+    const featureItem = await route("feature_layer.feature.item", {
+      id: this.resourceId,
+      fid: this.featureId,
+    }).get<FeatureItem>({
+      signal,
+      query: { dt_format: "iso" },
+    });
+    this._setFeatureItem(featureItem);
+  }
+
+  private async _initialize() {
+    this._abort();
+    const signal = this._abortController.makeSignal();
+    const resp = await this._loadResource(signal);
+    if (!this._featureItem) {
+      await this._loadFeatureItem(signal);
+    }
+    return resp;
+  }
+
+  preparePayload = ({ ignoreDirty }: { ignoreDirty?: boolean } = {}) => {
+    const extensions: Record<string, unknown> = {};
+    for (const key in this._extensionStores) {
+      const storeExtension = this._extensionStores[key];
+      extensions[key] = storeExtension.value;
+    }
+
+    const json:
+      | RouteBody<"feature_layer.feature.item", "put">
+      | RouteBody<"feature_layer.feature.collection", "patch"> = {
+      extensions,
+    };
+
+    if (this._attributeStore && (ignoreDirty || this._attributeStore.dirty)) {
+      json.fields = this._attributeStore.value;
+    }
+    if (this._geometryStore && (ignoreDirty || this._geometryStore.dirty)) {
+      json.geom = this._geometryStore.value;
+    }
+    return json;
+  };
+
+  @action.bound
+  async save(): Promise<CompositeRead | undefined> {
+    try {
+      this.setSaving(true);
+      const json = this.preparePayload();
+      if (typeof this.featureId !== "number") {
+        await route("feature_layer.feature.collection", {
+          id: this.resourceId,
+        }).patch({
+          // @ts-expect-error TODO: define patch payload for feature_layer.feature.collection
+          json: [json],
+          query: { dt_format: "iso" },
+        });
+      } else {
+        await route("feature_layer.feature.item", {
+          id: this.resourceId,
+          fid: this.featureId,
+        }).put({
+          query: { dt_format: "iso" },
+          json,
+        });
+      }
+
+      this._abort();
+      const signal = this._abortController.makeSignal();
+      await this._loadFeatureItem(signal);
+      return await this._loadResource(signal);
+    } finally {
+      this.setSaving(false);
+    }
+  }
+
+  @action.bound
+  destroy() {
+    this._abort();
+    this._initializing = undefined;
+    this.setInitLoading(false);
+  }
+
+  @action.bound
+  attachAttributeStore(attributeStore: EditorStore) {
+    this._attributeStore = attributeStore;
+    if (this._featureItem) {
+      this._setAttributesValue(this._featureItem.fields);
+    }
+  }
+  @action.bound
+  attachGeometryStore(geometryStore: EditorStore) {
+    this._geometryStore = geometryStore;
+    if (this._featureItem) {
+      this._setGeometryValue(this._featureItem.geom);
+    }
+  }
+
+  @action.bound
+  addExtensionStore(key: string, extensionStore: EditorStore) {
+    this._extensionStores[key] = extensionStore;
+    if (this._featureItem) {
+      this._setExtensionsValue(this._featureItem.extensions, {
+        include: [key],
+      });
+    }
+  }
+
+  @action.bound
+  reset() {
+    this._setFeatureItem(this._featureItem);
+  }
+
+  @action
+  private _setStoreValues(featureItem?: FeatureItem) {
+    this._setExtensionsValue(featureItem ? featureItem.extensions : null);
+    this._setAttributesValue(featureItem ? featureItem.fields : null);
+    this._setGeometryValue(featureItem ? featureItem.geom : null);
+  }
+
+  private _setAttributesValue(attributes: NgwAttributeValue | null) {
+    if (this._attributeStore) {
+      this._attributeStore.load(attributes);
+    }
+  }
+  private _setGeometryValue(geom: string | null) {
+    if (this._geometryStore) {
+      this._geometryStore.load(geom);
+    }
+  }
+
+  @action
+  private _setExtensionsValue(
+    extensions: FeatureItemExtensions | null,
+    { include }: { include?: string[] } = {}
+  ) {
+    for (const key in extensions) {
+      if (include && !include.includes(key)) {
+        continue;
+      }
+      const extension = extensions[key];
+      const extensionStore = this._extensionStores[key];
+      if (extension !== undefined && extensionStore !== undefined) {
+        extensionStore.load(extension);
+      }
+    }
+  }
+
+  private _getStores(): EditorStore[] {
+    const stores: EditorStore[] = [];
+    if (this._attributeStore) stores.push(this._attributeStore);
+    if (this._geometryStore) stores.push(this._geometryStore);
+    stores.push(...Object.values(this._extensionStores));
+    return stores;
+  }
+
+  @action
+  private _setFeatureItem(featureItem?: FeatureItem): void {
+    this._featureItem = featureItem;
+    this._setStoreValues(featureItem);
+  }
+
+  private _abort(): void {
+    this._abortController.abort();
+  }
+}

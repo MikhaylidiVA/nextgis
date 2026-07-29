@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+*.egg-info
+build/
+dist/
+sdist/
+node_modules/
+
+# Translations
+*.mo
+*.pot
+*.jed
+
+# Generated client code
+**/nodepkg/**/*.inc.*
+
+# Sphinx documentation
+doc/_build/
+doc/*/_build/
+*~
+
+# IDE
+.idea
+.vscode
+
+XDG_CACHE_HOME

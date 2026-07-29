@@ -1,0 +1,295 @@
+import { theme } from "antd";
+import { debounce } from "lodash-es";
+import { observer } from "mobx-react-lite";
+import { useCallback, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+
+import { Badge, Button, Table } from "@nextgisweb/gui/antd";
+import type { TableColumnProps, TableProps } from "@nextgisweb/gui/antd";
+import { sorterFactory } from "@nextgisweb/gui/util";
+import { gettext } from "@nextgisweb/pyramid/i18n";
+import { resources } from "@nextgisweb/resource/blueprint";
+import type {
+  ResourceCls,
+  ResourceInterface,
+} from "@nextgisweb/resource/type/api";
+
+import { ResourceLabel } from "../ResourceLabel";
+
+import usePickerCard from "./hook/usePickerCard";
+import type {
+  PickerResource,
+  ResourcePickerChildrenProps,
+  RowSelectionType,
+  SelectValue,
+} from "./type";
+
+import FolderOpenIcon from "@nextgisweb/icon/material/arrow_forward";
+import SelectFirstIcon from "@nextgisweb/icon/material/editor_choice";
+
+import "./ResourcePickerChildren.less";
+
+const msgDislpayName = gettext("Display name");
+const msgSelectFirst = gettext("Select first eligible child resource");
+
+function ResourcePickerChildrenInner<V extends SelectValue = SelectValue>({
+  store,
+  onOk,
+}: ResourcePickerChildrenProps<V>) {
+  const {
+    loading,
+    multiple,
+    selected,
+    resources: res,
+    allowSelection,
+    traverseClasses,
+    allowMoveInside,
+    loadingParentsChildren,
+    selectedParentsRegistry,
+    getResourceClasses,
+  } = store;
+
+  const [selectionType] = useState<RowSelectionType>(() =>
+    multiple ? "checkbox" : "radio"
+  );
+  const { getCheckboxProps } = usePickerCard({ store });
+
+  const dataSource = useMemo(() => {
+    if (res) {
+      return [...res].sort((a, b) => {
+        const acls = a.get("resource.cls");
+        const bcls = b.get("resource.cls");
+
+        const orderA = resources[acls]?.order ?? 0;
+        const orderB = resources[bcls]?.order ?? 0;
+
+        if (orderA !== orderB) {
+          return orderA - orderB;
+        }
+
+        return a
+          .get("resource.display_name")
+          .localeCompare(b.get("resource.display_name"));
+      });
+    }
+    return [];
+  }, [res]);
+
+  const rowSelection = useMemo(() => {
+    if (!allowSelection) return;
+    return {
+      type: selectionType,
+      getCheckboxProps,
+      selectedRowKeys: selected,
+      onChange: (selectedRowKeys: (string | number)[]) => {
+        const newKeys = selectedRowKeys.map(Number);
+
+        const dataSourceIds = dataSource.map((item) => item.id);
+        let newSelected: number[];
+
+        if (!multiple) {
+          newSelected = newKeys;
+        } else if (newKeys.length === 0) {
+          newSelected = selected.filter((id) => !dataSourceIds.includes(id));
+        } else {
+          const preserved = selected.filter(
+            (id) => !dataSourceIds.includes(id)
+          );
+
+          const updatedCurrent = dataSourceIds.filter((id) =>
+            newKeys.includes(id)
+          );
+          newSelected = [...preserved, ...updatedCurrent];
+        }
+        store.setSelected(newSelected);
+      },
+    } as TableProps["rowSelection"];
+  }, [
+    getCheckboxProps,
+    allowSelection,
+    selectionType,
+    dataSource,
+    multiple,
+    selected,
+    store,
+  ]);
+
+  const canTraverse = useCallback(
+    (record: PickerResource) => {
+      const cls = record.get("resource.cls");
+      const classes = getResourceClasses([cls]);
+      const isGroup = classes.some((cls) => cls === "resource_group");
+      const disabled =
+        traverseClasses &&
+        !classes.some((cls) => traverseClasses.includes(cls));
+      const allowMoveToEmpty = isGroup
+        ? true
+        : !!record.get("resource.children");
+      return !(disabled || !allowMoveToEmpty || !allowMoveInside);
+    },
+    [allowMoveInside, getResourceClasses, traverseClasses]
+  );
+
+  const { token } = theme.useToken();
+  const colorPrimary = token.colorPrimary;
+
+  const renderActions = useCallback<
+    NonNullable<TableColumnProps<PickerResource>["render"]>
+  >(
+    (_, record) => {
+      let openBtn: ReactNode = undefined;
+      let selectFirstBtn: ReactNode = undefined;
+      if (canTraverse(record)) {
+        const selectedParent = store.multiple
+          ? selectedParentsRegistry.get(record.id)
+          : undefined;
+        const childrenCount = selectedParent
+          ? selectedParent.children.length
+          : undefined;
+        openBtn = (
+          <Badge
+            dot={!!childrenCount}
+            count={childrenCount}
+            offset={[-4, 4]}
+            color={colorPrimary}
+          >
+            <Button
+              type="text"
+              shape="circle"
+              icon={<FolderOpenIcon />}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                store.changeParentTo(record.id);
+              }}
+            />
+          </Badge>
+        );
+
+        const findFirstInterfaces: ResourceInterface[] = ["IFeatureLayer"];
+        const findFirstClasses: ResourceCls[] = ["raster_layer"];
+
+        const interfaces = record.get("resource.interfaces") || [];
+        const cls = record.get("resource.cls");
+
+        const canSelectFirstChildren =
+          interfaces.some((resInterface) =>
+            findFirstInterfaces.includes(resInterface)
+          ) || findFirstClasses.includes(cls);
+
+        if (!selectedParent && canSelectFirstChildren && multiple) {
+          selectFirstBtn = (
+            <Button
+              type="text"
+              shape="circle"
+              loading={loadingParentsChildren.has(record.id)}
+              icon={<SelectFirstIcon />}
+              title={msgSelectFirst}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                store.selectFirstChildren(record.id);
+              }}
+            />
+          );
+        }
+      }
+
+      return (
+        <>
+          {selectFirstBtn}
+          {openBtn}
+        </>
+      );
+    },
+    [
+      canTraverse,
+      colorPrimary,
+      loadingParentsChildren,
+      multiple,
+      selectedParentsRegistry,
+      store,
+    ]
+  );
+
+  const columns = useMemo<TableProps["columns"]>(
+    () => [
+      {
+        title: msgDislpayName,
+        className: "displayName",
+        sorter: sorterFactory("display_name"),
+        render: (_, item: PickerResource) => {
+          const displayName = item.get("resource.display_name");
+          const cls = item.get("resource.cls");
+          return (
+            <ResourceLabel label={displayName} resourceId={item.id} cls={cls} />
+          );
+        },
+      },
+      {
+        className: "actions",
+        dataIndex: "actions",
+        align: "right",
+        render: renderActions,
+      },
+    ],
+    [renderActions]
+  );
+
+  const onRow = useCallback(
+    (record: PickerResource) => {
+      const select = (pick = false) => {
+        const props = getCheckboxProps(record);
+
+        if (props.disabled) {
+          if (pick && canTraverse(record)) {
+            store.changeParentTo(record.id);
+          }
+          return;
+        }
+        if (pick && onOk && !multiple) {
+          const toPick = multiple ? [record.id] : record.id;
+          onOk(toPick as V);
+          return;
+        }
+        const existIndex = selected.indexOf(record.id);
+        const newSelected = multiple ? [...selected] : [];
+        // unselect on second click
+        if (existIndex !== -1) {
+          newSelected.splice(existIndex, 1);
+        } else {
+          newSelected.push(record.id);
+        }
+        store.setSelected(newSelected);
+      };
+      return {
+        onDoubleClick: () => {
+          select(true);
+        },
+        onClick: debounce(() => {
+          select();
+        }, 150),
+      };
+    },
+    [canTraverse, getCheckboxProps, multiple, onOk, store, selected]
+  );
+
+  return (
+    <Table
+      className="ngw-resource-component-resource-picker-children"
+      parentHeight
+      showHeader={false}
+      expandable={{ childrenColumnName: "children_" }}
+      dataSource={dataSource}
+      columns={columns}
+      rowKey="id"
+      size="middle"
+      loading={loading.setChildrenFor}
+      rowSelection={rowSelection}
+      onRow={onRow}
+    />
+  );
+}
+
+export const ResourcePickerChildren = observer(ResourcePickerChildrenInner);
+ResourcePickerChildren.displayName = "ResourcePickerChildren";

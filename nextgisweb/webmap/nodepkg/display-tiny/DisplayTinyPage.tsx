@@ -1,0 +1,78 @@
+import { observer } from "mobx-react-lite";
+import { useEffect, useRef, useState } from "react";
+
+import { Spin } from "@nextgisweb/gui/antd";
+import { routeURL } from "@nextgisweb/pyramid/api";
+import { useRouteGet } from "@nextgisweb/pyramid/hook";
+import { gettext } from "@nextgisweb/pyramid/i18n";
+
+import { handlePostMessage } from "../compat/util/handlePostMessage";
+import { Display } from "../display";
+import { DisplayWidget } from "../display/DisplayWidget";
+import type { DisplayComponentProps } from "../display/DisplayWidget";
+import { LinkToControl } from "../map-component/control/LinkToMainMap";
+import type { TinyConfig } from "../type";
+
+const DisplayTinyWidget = observer(
+  ({ config, tinyConfig }: DisplayComponentProps) => {
+    const [display] = useState<Display>(
+      () =>
+        new Display({
+          config,
+          tinyConfig,
+        })
+    );
+
+    useEffect(
+      function buildTinyPanels() {
+        const activePanel = display.panelManager.getActivePanelName;
+        if (!activePanel) {
+          return;
+        }
+        display.panelManager.deactivatePanel();
+      },
+      [display.panelManager, display.panelManager.getActivePanelName]
+    );
+
+    const positionRef = useRef(display.map.position);
+
+    useEffect(() => {
+      handlePostMessage(display, display.map.position, positionRef.current);
+      positionRef.current = display.map.position;
+    }, [display, display.map.position]);
+
+    return (
+      <DisplayWidget
+        className="ngw-webmap-display-tiny"
+        display={display}
+        config={config}
+        mapChildren={
+          !!tinyConfig &&
+          display.urlParams.linkMainMap === "true" && (
+            <LinkToControl
+              url={tinyConfig.mainDisplayUrl}
+              position="top-right"
+              title={gettext("Open full map")}
+            />
+          )
+        }
+      />
+    );
+  }
+);
+DisplayTinyWidget.displayName = "DisplayTinyWidget";
+
+export default function DisplayTinyPage({ id }: { id: number }) {
+  const { data: config, isLoading } = useRouteGet("webmap.display_config", {
+    id,
+  });
+
+  const [tinyConfig] = useState<TinyConfig>(() => ({
+    mainDisplayUrl: routeURL("webmap.display", id) + "?" + location.search,
+  }));
+
+  if (isLoading || !config) {
+    return <Spin size="large" fullscreen />;
+  }
+  return <DisplayTinyWidget config={config} tinyConfig={tinyConfig} />;
+}

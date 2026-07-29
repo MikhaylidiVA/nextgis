@@ -1,0 +1,630 @@
+#: api.py:181
+msgid "Storage management is not enabled on this server."
+msgstr "Управление хранилищем не включено на этом сервере."
+
+#: api.py:278
+msgid ""
+"Invalid font file name: '{}'. Only latin letters, digits, hyphens and "
+"underscores are allowed. The *.ttf or *.otf extension is required."
+msgstr ""
+"Недопустимое имя файла шрифта: '{}'. Разрешены только латинские буквы, цифры,"
+" дефисы и подчеркивания. Требуется расширение *.ttf или *.otf."
+
+#: api.py:285
+msgid "Font '{0}' is larger than {1} bytes."
+msgstr "Шрифт '{0}' больше {1} байт."
+
+#: api.py:485
+msgid ""
+"The '{}' query parameter should not contain additional values if 'all' is "
+"specified."
+msgstr ""
+"Параметр запроса '{}' не должен содержать дополнительных значений, если "
+"указано 'all'."
+
+#: api.py:614
+msgid "Got an unsupported MIME type: '{}'."
+msgstr "Получен неподдерживаемый тип MIME: '{}'."
+
+#: api.py:617
+msgid "{}KiB should be enough for a logo."
+msgstr "{}KiB должно быть достаточно для логотипа."
+
+#: api.py:780
+msgid "Your Web GIS at nextgis.com"
+msgstr "Ваши карты онлайн на nextgis.com"
+
+#: component.py:160
+msgid "Request timeout"
+msgstr "Таймаут запроса"
+
+#: component.py:163
+msgid "Enabled"
+msgstr "Включено"
+
+#: component.py:163
+msgid "Disabled"
+msgstr "Отключено"
+
+#: exception.py:219
+msgid "Internal server error"
+msgstr "Внутренняя ошибка сервера"
+
+#: exception.py:221
+msgid ""
+"The server encountered an internal error or misconfiguration and was unable "
+"to complete your request."
+msgstr ""
+"При обработке запроса возникла внутренняя ошибка или сервер настроен "
+"некорректно и не может обработать запрос."
+
+#: exception.py:253
+msgid "Bad request"
+msgstr "Некорректный запрос"
+
+#: exception.py:255
+msgid ""
+"The server could not comply with the request since it is either malformed or "
+"otherwise incorrect."
+msgstr "Сервер не может выполнить запрос. Возможно, в запросе ошибка."
+
+#: exception.py:262
+msgid "Payment required"
+msgstr "Необходима оплата"
+
+#: exception.py:263
+msgid "Access was denied for financial reasons."
+msgstr "Доступ закрыт по финансовым причинам."
+
+#: exception.py:268
+msgid "Forbidden"
+msgstr "Доступ запрещен"
+
+#: exception.py:269
+msgid "Access was denied to this resource."
+msgstr "У вас нет доступа к этому ресурсу."
+
+#: exception.py:274
+msgid "Page not found"
+msgstr "Страница не найдена"
+
+#: exception.py:276
+msgid ""
+"The page may have been deleted or an error in the address. Correct the "
+"address or go to the home page and try to find the desired page."
+msgstr ""
+"Возможно, страница удалена либо в адресе допущена ошибка. Исправьте адрес или"
+" вернитесь на главную страницу и попробуйте найти нужную страницу с помощью "
+"навигации."
+
+#: exception.py:283
+msgid "Unprocessable entity"
+msgstr "Необрабатываемая сущность"
+
+#: exception.py:284
+msgid "Unable to process the contained instructions."
+msgstr "Невозможно выполнить запрошенную операцию."
+
+#: exception.py:289 exception.py:290
+msgid "Not implemented"
+msgstr "Не реализовано"
+
+#: exception.py:295
+msgid "Service unavailable"
+msgstr "Сервис недоступен"
+
+#: exception.py:296
+msgid "The server is currently unavailable. Please try again at a later time."
+msgstr ""
+"В настоящий момент сервер недоступен. Пожалуйста, попробуйте выполнить "
+"действие еще раз через некоторое время."
+
+#: lunkwill.py:15
+msgid "Lunkwill not enabled"
+msgstr "Lunkwill не включен"
+
+#: lunkwill.py:16
+msgid "The Lunkwill extension is not configured on this server."
+msgstr "Расширение Lunkwill не настроено на этом сервере."
+
+#: lunkwill.py:20
+msgid "Interception expected"
+msgstr "Ожидается перехват"
+
+#: lunkwill.py:21
+msgid "The Lunkwill extension expects external request interception."
+msgstr "Расширение Lunkwill ожидает перехват внешних запросов."
+
+#: nodepkg/api/error.ts:18 nodepkg/api/error.ts:42
+msgid "Something went wrong."
+msgstr "Что-то пошло не так."
+
+#: nodepkg/api/error.ts:19
+msgid "Unknown API error"
+msgstr "Неизвестная ошибка API"
+
+#: nodepkg/api/error.ts:32
+msgid "There is no response from the server or problem connecting to server."
+msgstr ""
+"Не удалось получить ответ от сервера либо в процессе соединения возникла "
+"ошибка."
+
+#: nodepkg/api/error.ts:35
+msgid "Network error"
+msgstr "Сетевая ошибка"
+
+#: nodepkg/api/error.ts:36
+msgid "Check network connectivity and try again later."
+msgstr "Проверьте сетевое соединение и попробуйте повторить позже."
+
+#: nodepkg/api/error.ts:43
+msgid "Unexpected server response"
+msgstr "Неожидаемый ответ сервера"
+
+#: nodepkg/api/error.ts:70
+msgid "Unexpected error while processing long-running request."
+msgstr "Неожиданная ошибка во время выполнения длительного запроса."
+
+#: nodepkg/api/error.ts:73
+msgid "Long-running request error"
+msgstr "Ошибка длительного запроса"
+
+#: nodepkg/api/error.ts:81
+msgid "Long-running request was cancelled."
+msgstr "Длительный запрос был отменен."
+
+#: nodepkg/api/error.ts:85
+msgid "Long-running request timeout."
+msgstr "Тайм-аут длительного запроса."
+
+#: nodepkg/backup-browse/BackupBrowse.tsx:23
+msgid "Filename"
+msgstr "Имя файла"
+
+#: nodepkg/backup-browse/BackupBrowse.tsx:37
+msgid "Timestamp (UTC)"
+msgstr "Время (UTC)"
+
+#: nodepkg/backup-browse/BackupBrowse.tsx:43
+msgid "Size"
+msgstr "Размер"
+
+#: nodepkg/cors-settings/CORSSettings.tsx:18
+msgid ""
+"Enter allowed origins for cross domain requests to use HTTP API of this Web "
+"GIS on other websites. One origin per line."
+msgstr ""
+"Введите перечень допустимых источников для кросс-доменных запросов для "
+"использования HTTP API этой Веб ГИС на других веб-сайтах. По одному источнику"
+" в строке."
+
+#: nodepkg/cors-settings/CORSSettings.tsx:19
+msgid ""
+"Please note that different protocols (HTTP and HTTPS) and subdomains "
+"(example.com and www.example.com) are different origins. Wildcards are "
+"allowed for third-level domains and higher."
+msgstr ""
+"Имейте в виду, что разные протоколы (HTTP и HTTPS) и субдомены (example.com и"
+" www.example.com) считаются разными источниками. Символ подстановки (*) "
+"допустим для доменов третьего уровня и выше."
+
+#: nodepkg/cors-settings/CORSSettings.tsx:57
+msgid "CORS settings updated"
+msgstr "Настройки CORS обновлены"
+
+#: nodepkg/cors-settings/CORSSettings.tsx:62
+msgid "Fix the form errors first"
+msgstr "Вначале исправьте ошибку в форме"
+
+#: nodepkg/cors-settings/CORSSettings.tsx:78
+msgid "The value entered is not valid"
+msgstr "Введенное значение некорректно"
+
+#: nodepkg/custom-css-form/CustomCSSForm.tsx:12
+msgid "Custom styles saved. Reload the page to get them applied."
+msgstr "Изменения в стилях сохранены. Обновите страницу, чтобы увидеть изменения."
+
+#: nodepkg/custom-css-form/CustomCSSForm.tsx:13
+msgid ""
+"Enter custom CSS rules here. They will be used to redefine styles, design for"
+" all pages of your Web GIS."
+msgstr ""
+"Здесь можно задать стили CSS. Они будут использованы для оформления всех "
+"страниц вашей Веб ГИС."
+
+#: nodepkg/fonts/FontsPanel.tsx:28
+msgid ""
+"During operation, the Web GIS will restart. All existing requests will be "
+"aborted. Proceed?"
+msgstr ""
+"Во время выполнения Веб ГИС будет перезапущена. Все текущие запросы будут "
+"прерваны. Продолжить?"
+
+#: nodepkg/fonts/FontsPanel.tsx:29
+msgid "Web GIS is restarting, please wait..."
+msgstr "Веб ГИС перезапускается, подождите..."
+
+#: nodepkg/fonts/FontsPanel.tsx:31
+msgid "Custom"
+msgstr "Пользовательский"
+
+#: nodepkg/fonts/FontsPanel.tsx:31
+msgid "System"
+msgstr "Системный"
+
+#: nodepkg/fonts/FontsPanel.tsx:106
+msgid "Font"
+msgstr "Шрифт"
+
+#: nodepkg/fonts/FontsPanel.tsx:111
+msgid "Format"
+msgstr "Формат"
+
+#: nodepkg/fonts/FontsPanel.tsx:116
+msgid "Type"
+msgstr "Тип"
+
+#: nodepkg/fonts/FontsPanel.tsx:173
+msgid "Delete"
+msgstr "Удалить"
+
+#: nodepkg/fonts/FontsPanel.tsx:180
+msgid "Show system fonts"
+msgstr "Показать системные шрифты"
+
+#: nodepkg/home-path/HomePath.tsx:4
+msgid "The home path setting is saved."
+msgstr "Настройка стартовой страницы сохранена."
+
+#: nodepkg/i18n/testentry.ts:9 nodepkg/i18n/testentry.ts:13 test/test_i18n.py:15
+msgctxt "test"
+msgid "unit"
+msgid_plural "units"
+msgstr[0] "штука"
+msgstr[1] "штуки"
+msgstr[2] "штук"
+
+#: nodepkg/layout/Avatar.tsx:13
+msgid "Sign in"
+msgstr "Войти"
+
+#: nodepkg/layout/Avatar.tsx:21
+msgid "Invitation session"
+msgstr "Сессия по приглашению"
+
+#: nodepkg/layout/Avatar.tsx:24
+msgid "User settings"
+msgstr "Настройки пользователя"
+
+#: nodepkg/layout/Avatar.tsx:26
+msgid "Sign out"
+msgstr "Выйти"
+
+#: nodepkg/layout/store.ts:71
+msgid "Resources"
+msgstr "Ресурсы"
+
+#: nodepkg/layout/store.ts:77 view.py:203
+msgid "Control panel"
+msgstr "Панель управления"
+
+#: nodepkg/layout/store.ts:84
+msgid "Help"
+msgstr "Справка"
+
+#: nodepkg/layout/store.ts:91
+msgid "Contact Web GIS administrator"
+msgstr "Связаться с администратором Веб ГИС"
+
+#: nodepkg/layout/store.ts:98 view.py:191
+msgid "OpenAPI documentation"
+msgstr "Документация OpenAPI"
+
+#: nodepkg/logo-form/LogoForm.tsx:5
+msgid "We recommend height of 45 px and width of up to 200 px."
+msgstr "Рекомендуемая высота 45 px и ширина до 200 px."
+
+#: nodepkg/logo-form/LogoForm.tsx:6
+msgid "Only PNG and SVG images are supported."
+msgstr "Поддерживаются только изображения PNG и SVG."
+
+#: nodepkg/metrics/GoogleAnalyticsTab.tsx:30
+msgid "Measurement ID"
+msgstr "Идентификатор потока данных"
+
+#: nodepkg/metrics/MetricSettings.tsx:21
+msgid "Add"
+msgstr "Добавить"
+
+#: nodepkg/metrics/MetricSettings.tsx:22
+msgid "The setting is saved."
+msgstr "Настройка сохранена."
+
+#: nodepkg/metrics/MetricSettings.tsx:23
+msgid "Reload the page to get them applied."
+msgstr "Обновите страницу, чтобы настройки вступили в силу."
+
+#: nodepkg/metrics/MetricSettings.tsx:24
+msgid "Add one or more counters to your Web GIS."
+msgstr "Добавьте один или несколько счетчиков в вашу Веб ГИС."
+
+#: nodepkg/metrics/MetricSettings.tsx:25
+msgid ""
+"HTML code of these counters will be embeded into each page and will allow you"
+" to track user activity."
+msgstr ""
+"HTML-код этих счетчиков будет встроен в каждую страницу и позволит "
+"отслеживать активность пользователей."
+
+#: nodepkg/metrics/YandexMetricaTab.tsx:31
+msgid "Tag number"
+msgstr "Номер счетчика"
+
+#: nodepkg/metrics/YandexMetricaTab.tsx:50
+msgid "Webvisor"
+msgstr "Вебвизор"
+
+#: nodepkg/metrics/tab.ts:32
+msgid "Google Analytics"
+msgstr "Google Аналитика"
+
+#: nodepkg/metrics/tab.ts:38
+msgid "Yandex.Metrica"
+msgstr "Яндекс.Метрика"
+
+#: nodepkg/storage-summary/StorageSummary.tsx:24
+msgid "Some changes may be reflected only after full estimation."
+msgstr ""
+"Некоторые изменения могут быть отражены только после полной оценки "
+"использования хранилища."
+
+#: nodepkg/storage-summary/StorageSummary.tsx:25
+msgid "Storage usage was fully estimated at {f}."
+msgstr "Использование хранилища было полностью оценено в {f}."
+
+#: nodepkg/storage-summary/StorageSummary.tsx:26
+msgid "Storage usage was fully estimated at {f} and updated at {u}."
+msgstr "Использование хранилища было полностью оценено в {f} и обновлено в {u}."
+
+#: nodepkg/storage-summary/StorageSummary.tsx:27
+msgid "Storage usage hasn't been estimated yet but was updated at {u}."
+msgstr ""
+"Использование хранилища еще не было полностью оценено, но было обновлено в "
+"{u}."
+
+#: nodepkg/storage-summary/StorageSummary.tsx:28
+msgid "Storage usage hasn't been estimated yet."
+msgstr "Использование хранилища еще не было полностью оценено."
+
+#: nodepkg/storage-summary/StorageSummary.tsx:114
+msgid "Kind of data"
+msgstr "Вид данных"
+
+#: nodepkg/storage-summary/StorageSummary.tsx:120
+msgid "Volume"
+msgstr "Размер"
+
+#: nodepkg/storage-summary/StorageSummary.tsx:139
+msgid "Total"
+msgstr "Итого"
+
+#: nodepkg/storage-summary/StorageSummary.tsx:144
+msgid "of"
+msgstr "из"
+
+#: nodepkg/storage-summary/StorageSummary.tsx:209
+msgid "Estimate storage"
+msgstr "Оценка хранилища"
+
+#: nodepkg/system-info/SystemInfo.tsx:59
+msgid "Package"
+msgstr "Пакет"
+
+#: nodepkg/system-info/SystemInfo.tsx:60
+msgid "Version"
+msgstr "Версия"
+
+#: nodepkg/system-info/SystemInfo.tsx:75
+msgid "Platform"
+msgstr "Платформа"
+
+#: nodepkg/system-info/SystemInfo.tsx:87
+msgid "Browser support"
+msgstr "Поддержка браузеров"
+
+#: nodepkg/system-info/SystemInfo.tsx:95
+msgid "or higher"
+msgstr "или выше"
+
+#: nodepkg/system-info/SystemInfo.tsx:96
+msgid "Not supported"
+msgstr "Не поддерживается"
+
+#: nodepkg/system-info/SystemInfo.tsx:102
+msgid "Your browser"
+msgstr "Ваш браузер"
+
+#: nodepkg/system-info/SystemInfoUpdate.tsx:16
+msgid "Checking for updates..."
+msgstr "Проверяем наличие обновлений..."
+
+#: nodepkg/system-info/SystemInfoUpdate.tsx:17
+msgid "<a>Contact support</a> for update."
+msgstr "<a>Обратитесь в поддержку</a> для установки обновлений."
+
+#: nodepkg/system-info/SystemInfoUpdate.tsx:18
+msgid "Show details"
+msgstr "Подробнее"
+
+#: nodepkg/system-info/SystemInfoUpdate.tsx:19
+msgid ""
+"Critical updates are available: {version}. Please consider updating an soon "
+"as possible."
+msgstr ""
+"Доступны критические обновления: {version}. Рекомендуем установить их как "
+"можно быстрее."
+
+#: nodepkg/system-info/SystemInfoUpdate.tsx:20
+msgid "New version of {distribution} is available: {version}."
+msgstr "Доступна новая версия {distribution}: {version}."
+
+#: nodepkg/system-info/SystemInfoUpdate.tsx:21
+msgid "Your {distribution} is up-to-date."
+msgstr "У вас последняя версия {distribution}."
+
+#: nodepkg/system-name-form/SystemNameForm.tsx:4
+msgid "The system name setting is saved."
+msgstr "Настройка названия Веб ГИС сохранена."
+
+#: nodepkg/update/index.tsx:24
+msgid "Critical updates are available"
+msgstr "Доступны критические обновления"
+
+#: nodepkg/update/index.tsx:25
+msgid "Updates are available"
+msgstr "Доступны обновления"
+
+#: nodepkg/update/index.tsx:32
+msgid "Click to see what's new"
+msgstr "Нажмите и узнайте, что нового"
+
+#: permission.py:5 view.py:308 view.py:752
+msgid "Cross-origin resource sharing (CORS)"
+msgstr "Cross-origin resource sharing (CORS)"
+
+#: template/uacompat.mako:3
+msgid "Browser compatibility test"
+msgstr "Проверка совместимости браузера"
+
+#: template/uacompat.mako:22
+msgid "%(name)s %(current)s supported"
+msgstr "%(name)s %(current)s поддерживается"
+
+#: template/uacompat.mako:23
+msgid ""
+"Web GIS browser compatibility test has been passed! The Web GIS should work "
+"fine."
+msgstr "Проверка совместимости браузера пройдена! Веб ГИС должна работать корректно."
+
+#: template/uacompat.mako:26
+msgid "%(name)s not supported"
+msgstr "%(name)s не поддерживается"
+
+#: template/uacompat.mako:27
+msgid ""
+"You're using %(name)s although it's not supported by the Web GIS. It's an "
+"outdated browser lacking required features. Try a different browser or "
+"contact your system administrator if another browser isn't available."
+msgstr ""
+"Вы используете %(name)s, хотя он не поддерживается Веб ГИС. Это устаревший "
+"браузер не обладащий рядом необходимых функций. Попробуйте использовать "
+"другой браузер или свяжитесь с вашим системным администратором если другой "
+"браузер недоступен."
+
+#: template/uacompat.mako:29
+msgid "%(name)s %(current)s not supported"
+msgstr "%(name)s %(current)s не поддерживается"
+
+#: template/uacompat.mako:30
+msgid ""
+"You're using %(name)s %(current)s although it's not supported by the Web GIS."
+" It's an outdated version lacking required features. Contact your system "
+"administrator for upgrading to %(name)s %(required)s+ or try a different "
+"browser."
+msgstr ""
+"Вы используете %(name)s %(current)s, хотя он не поддерживается Веб ГИС. Это "
+"устаревшая версия браузера, не обладащая рядом необходимых функций. Свяжитесь"
+" с вашим системным администратором для обновления или попробуйте использовать"
+" другой браузер."
+
+#: template/uacompat.mako:34
+msgid ""
+"If you still want to continue using the current browser, click the link below"
+" to bypass the compatibility test. The Web GIS or some features may degrade "
+"or fail  in this case."
+msgstr ""
+"Если вы все же хотите продолжить использование Веб ГИС с текущий браузером, "
+"нажмите на ссылку ниже, чтобы пропустить проверку совместимости. Веб ГИС или "
+"часть ее функций могут работать некорректно в этом случае."
+
+#: template/uacompat.mako:35
+msgid "I understood but want to proceed at my own risk. Skip the test!"
+msgstr "Понятно, но я хочу продолжить на свой страх и риск. Пропустить тест!"
+
+#: template/uacompat.mako:37
+msgid "Unknown browser"
+msgstr "Неизвестный браузер"
+
+#: template/uacompat.mako:38
+msgid "If you are using an up-to-date browser the Web GIS should be fine."
+msgstr ""
+"Если вы используете актуальную версию браузера, Веб ГИС будет работать "
+"нормально."
+
+#: tomb/config.py:99
+msgid "Parameter required"
+msgstr "Требуется параметр"
+
+#: tomb/config.py:100
+msgid "The '{}' query parameter is required."
+msgstr "Необходимо указать значение параметра '{}'."
+
+#: tomb/config.py:102
+msgid "Invalid parameter"
+msgstr "Некорректный параметр"
+
+#: tomb/config.py:103
+msgid "The '{}' query parameter has an invalid value."
+msgstr "Параметр запроса '{}' имеет недопустимое значение."
+
+#: tomb/exception.py:7
+msgid "Malformed JSON body"
+msgstr "Некорректное JSON тело"
+
+#: tomb/exception.py:8
+msgid "The JSON body of the request is malformed or invalid."
+msgstr "JSON тело запроса имеет некорректный или недопустимый формат."
+
+#: view.py:257 view.py:761
+msgid "System information"
+msgstr "Информация о системе"
+
+#: view.py:267 view.py:767
+msgid "Font management"
+msgstr "Управление шрифтами"
+
+#: view.py:276 view.py:804
+msgid "Storage"
+msgstr "Хранилище"
+
+#: view.py:290 view.py:811
+msgid "Backups"
+msgstr "Резервные копии"
+
+#: view.py:318 view.py:779
+msgid "Custom CSS"
+msgstr "Пользовательские стили CSS"
+
+#: view.py:327 view.py:785
+msgid "Custom logo"
+msgstr "Логотип"
+
+#: view.py:336 view.py:773
+msgid "Web GIS name"
+msgstr "Название Веб ГИС"
+
+#: view.py:345 view.py:791
+msgid "Home path"
+msgstr "Стартовая страница"
+
+#: view.py:354 view.py:797
+msgid "Metrics and analytics"
+msgstr "Метрики и аналитика"
+
+#: view.py:741
+msgid "Info"
+msgstr "Информация"
+
+#: view.py:742
+msgid "Settings"
+msgstr "Настройки"

@@ -1,0 +1,146 @@
+import { uniqueId } from "lodash-es";
+import type { Layer } from "ol/layer";
+import type { Source } from "ol/source";
+import type { Style } from "ol/style";
+
+import type { FilterExpressionString } from "@nextgisweb/feature-layer/feature-filter/type";
+import type { LayerSymbols } from "@nextgisweb/webmap/compat/type";
+
+export interface LayerOptions {
+  title?: string;
+  visible?: boolean;
+  opacity?: number;
+  isTopLayer?: boolean;
+  maxResolution?: number;
+  minResolution?: number;
+  minZoom?: number;
+  style?: Style;
+}
+
+export type ExtendedOlLayer<
+  TSource extends Source = Source,
+  TLayer extends Layer<TSource> = Layer<TSource>,
+> = TLayer;
+
+/** We are using CoreLayer instead of BaseLayer here to avoid mismatch with cartographic baselayer on the bottom of map */
+export abstract class CoreLayer<
+  TSource extends Source = Source,
+  TLayer extends ExtendedOlLayer<TSource> = ExtendedOlLayer<TSource>,
+  TSourceOptions = unknown,
+> {
+  id = uniqueId();
+  name: string;
+  title: string;
+  olLayer: TLayer;
+  olSource: TSource;
+  symbols: LayerSymbols = [];
+
+  private _isBaseLayer = false;
+  private _isTopLayer = false;
+
+  get isBaseLayer() {
+    return this._isBaseLayer;
+  }
+  set isBaseLayer(val: boolean) {
+    if (!this._isTopLayer) {
+      this._isBaseLayer = val;
+    } else {
+      throw new Error("The layer is already `top-layer`");
+    }
+  }
+  get isTopLayer() {
+    return this._isTopLayer;
+  }
+  set isTopLayer(val: boolean) {
+    if (!this._isBaseLayer) {
+      this._isTopLayer = val;
+    } else {
+      throw new Error("The layer is already `base-layer`");
+    }
+  }
+
+  protected abstract createSource(options: TSourceOptions): TSource;
+  protected abstract createLayer(
+    options: LayerOptions & { source: TSource }
+  ): TLayer;
+
+  constructor(
+    name: string,
+    layerOptions: LayerOptions = {},
+    sourceOptions?: TSourceOptions
+  ) {
+    this.name = name;
+    this.title = layerOptions.title || name;
+    this.isTopLayer = layerOptions.isTopLayer ?? false;
+
+    this.olSource = this.createSource(sourceOptions as TSourceOptions);
+    this.olLayer = this.createLayer({
+      ...layerOptions,
+      source: this.olSource,
+    });
+
+    this.setOpacity(this.olLayer.getOpacity() ?? 1);
+    this.setVisibility(this.olLayer.getVisible() ?? true);
+
+    this.bindLayerEvents();
+  }
+
+  bindLayerEvents(): void {
+    this.olLayer.on("change:visible", () => {
+      this.setVisibility(this.olLayer.getVisible() ?? true);
+    });
+
+    this.olLayer.on("change:opacity", () => {
+      this.setOpacity(this.olLayer.getOpacity() ?? 1);
+    });
+  }
+
+  setVisibility(visibility: boolean): void {
+    this.olLayer.setVisible(visibility);
+  }
+
+  setOpacity(opacity: number): void {
+    this.olLayer.setOpacity(opacity);
+  }
+
+  setSymbols(symbols: LayerSymbols): void {
+    this.toggleSourceBySymbols(symbols, this.olLayer, this.olSource);
+  }
+
+  setFilter(_filter: FilterExpressionString | null) {
+    //
+  }
+
+  setZIndex(zIndex: number) {
+    this.getLayer()?.setZIndex(zIndex);
+  }
+
+  reload(): void {
+    this.olSource.changed();
+  }
+
+  getLayer(): TLayer {
+    return this.olLayer;
+  }
+
+  getSource(): TSource {
+    return this.olSource;
+  }
+
+  dispose() {
+    this.olLayer.dispose();
+    this.olSource.dispose();
+  }
+
+  private toggleSourceBySymbols(
+    symbols: LayerSymbols,
+    layer: TLayer,
+    source: TSource
+  ) {
+    if (symbols === "-1") {
+      layer.setSource(null);
+    } else {
+      layer.setSource(source);
+    }
+  }
+}

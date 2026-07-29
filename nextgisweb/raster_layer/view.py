@@ -1,0 +1,77 @@
+from msgspec import Struct, field
+from pyramid.httpexceptions import HTTPNotFound
+
+from nextgisweb.env import gettext
+
+from nextgisweb.gui import react_renderer
+from nextgisweb.jsrealm import jsentry
+from nextgisweb.pyramid import client_setting
+from nextgisweb.resource import Widget
+from nextgisweb.resource.extaccess import ExternalAccessLink
+
+from .component import RasterLayerComponent
+from .gdaldriver import GDAL_DRIVER_NAME_2_EXPORT_FORMATS
+from .model import RasterLayer, RasterLayerStorage
+
+
+class RasterLayerStorageWidget(Widget):
+    resource = RasterLayerStorage
+    operation = ("create", "update")
+    amdmod = jsentry("@nextgisweb/raster-layer/storage-widget")
+
+
+class RasterLayerWidget(Widget):
+    resource = RasterLayer
+    operation = ("create", "update")
+    amdmod = jsentry("@nextgisweb/raster-layer/editor-widget")
+
+
+@react_renderer("@nextgisweb/raster-layer/export-form")
+def export(request):
+    if not request.context.has_export_permission(request.user):
+        raise HTTPNotFound()
+    return dict(
+        obj=request.context,
+        title=gettext("Save as"),
+        props=dict(id=request.context.id),
+        maxheight=True,
+    )
+
+
+class COGLink(ExternalAccessLink):
+    title = gettext("Cloud Optimized GeoTIFF")
+    help = gettext(
+        "A Cloud Optimized GeoTIFF (COG) is a regular GeoTIFF file, aimed at being hosted on a HTTP file server, with an internal organization that enables more efficient workflows on the cloud. It does this by leveraging the ability of clients issuing ​HTTP GET range requests to ask for just the parts of a file they need."
+    )
+
+    resource = RasterLayer
+    attr_name = "cog"
+
+    @classmethod
+    def url_factory(cls, obj, request) -> str:
+        return request.route_url("raster_layer.cog", id=obj.id)
+
+
+class RasterLayerExportFormatClientSetting(Struct, kw_only=True):
+    name: str
+    display_name: str = field(name="alias")
+
+
+@client_setting("exportFormats")
+def cs_export_formats(
+    comp: RasterLayerComponent, request
+) -> list[RasterLayerExportFormatClientSetting]:
+    return [RasterLayerExportFormatClientSetting(**i) for i in GDAL_DRIVER_NAME_2_EXPORT_FORMATS]
+
+
+@client_setting("cogDefault")
+def cs_cog_default(comp: RasterLayerComponent, request) -> bool:
+    return comp.cog_default
+
+
+def setup_pyramid(comp, config):
+    config.add_view(
+        export,
+        route_name="resource.export.page",
+        context=RasterLayer,
+    )

@@ -1,0 +1,78 @@
+import { useEffect, useState } from "react";
+
+import { Modal } from "@nextgisweb/gui/antd";
+import type { ModalProps } from "@nextgisweb/gui/antd";
+
+import type { ModalStore } from "../show-modal/ModalStore";
+import showModal from "../showModal";
+
+import { ErrorWidget } from "./ErrorWidget";
+import { extractError } from "./extractError";
+import type { ErrorInfo } from "./extractError";
+import { isAbortError } from "./util";
+
+export interface ErrorModalProps extends ModalProps {
+  error: ErrorInfo;
+}
+
+const DEFAULTS = {
+  centered: true,
+  width: "40em",
+  transitionName: "",
+  maskTransitionName: "",
+};
+
+export function ErrorModal({
+  error,
+  open: open_,
+  visible,
+  ...props
+}: ErrorModalProps) {
+  const [open, setOpen] = useState(visible ?? open_ ?? true);
+
+  const close = () => setOpen(false);
+
+  useEffect(() => {
+    const isOpen = visible ?? open_;
+    if (typeof isOpen === "boolean") {
+      setOpen(isOpen);
+    }
+  }, [visible, open_]);
+
+  return (
+    <Modal
+      {...DEFAULTS}
+      {...props}
+      open={open}
+      footer={null}
+      destroyOnHidden
+      onCancel={close}
+    >
+      <ErrorWidget error={error} onOk={close} />
+    </Modal>
+  );
+}
+
+interface ErrorModalOpts extends Partial<ErrorModalProps> {
+  ignoreAbort?: boolean;
+  modalStore?: ModalStore;
+}
+
+export function errorModal(error: unknown, opts?: ErrorModalOpts): boolean {
+  const { ignoreAbort = true, ...props } = opts ?? {};
+  if (ignoreAbort && isAbortError(error)) return false;
+
+  if (window.ngwSentry && error instanceof Error) {
+    window.ngwSentry.captureException(error);
+  }
+
+  showModal(ErrorModal, { error: extractError(error), ...props });
+  return true;
+}
+
+export function errorModalUnlessAbort(
+  error: unknown,
+  opts?: Omit<ErrorModalOpts, "ignoreAbortError">
+): boolean {
+  return errorModal(error, { ignoreAbort: true, ...opts });
+}

@@ -1,0 +1,163 @@
+import { useMemo } from "react";
+
+import settings from "@nextgisweb/auth/client-settings";
+import type { GroupRead } from "@nextgisweb/auth/type/api";
+import { Alert, Checkbox, Input } from "@nextgisweb/gui/antd";
+import { LoadingWrapper } from "@nextgisweb/gui/component";
+import { LanguageSelect } from "@nextgisweb/gui/component/language-select";
+import type { FormField } from "@nextgisweb/gui/fields-form";
+import { KeynameRule } from "@nextgisweb/gui/fields-form/rules/KeynameRule";
+import { ModelForm } from "@nextgisweb/gui/model-form";
+import type { Model } from "@nextgisweb/gui/model-form";
+import { useRouteGet } from "@nextgisweb/pyramid/hook/useRouteGet";
+import { gettext, gettextf } from "@nextgisweb/pyramid/i18n";
+
+import { PermissionSelect, PrincipalSelect } from "../component";
+import { makeTeamManageButton, default as oauth } from "../oauth";
+
+import { UserWidgetAlinkToken } from "./UserWidgetAlinkToken";
+import { UserWidgetPassword } from "./UserWidgetPassword";
+
+/* prettier-ignore */ const
+msgConsiderAddingToTeam = gettextf("Consider adding {name} user to your team instead of creating a new user with a password.")({ name: oauth.name });
+
+const messages = {
+  deleteConfirm: gettext("Delete user?"),
+  deleteSuccess: gettext("User deleted"),
+};
+
+interface UserWidgetProps {
+  id: number;
+  readonly: boolean;
+}
+
+export function UserWidget({ id, readonly }: UserWidgetProps) {
+  const { data: group, isLoading } = useRouteGet<GroupRead[]>(
+    "auth.group.collection"
+  );
+
+  const isNewUser = useMemo(() => id === undefined, [id]);
+
+  const showFullColumns = settings.userLimit.local !== 0;
+
+  const fields = useMemo<FormField[]>(() => {
+    return [
+      {
+        name: "display_name",
+        label: gettext("Full name"),
+        formItem: <Input />,
+        required: true,
+      },
+      {
+        name: "keyname",
+        label: gettext("Login"),
+        required: true,
+        rules: [KeynameRule],
+        formItem: <Input />,
+      },
+      ...(showFullColumns
+        ? [
+            {
+              name: "password",
+              label: gettext("Password"),
+              formItem: isNewUser ? (
+                <Input.Password
+                  autoComplete="new-password"
+                  placeholder={gettext("Enter new password here")}
+                />
+              ) : (
+                <UserWidgetPassword
+                  autoComplete="new-password"
+                  placeholder={gettext("Enter new password here")}
+                />
+              ),
+              required: true,
+            },
+          ]
+        : []),
+      {
+        name: "oauth_subject",
+        label: oauth.name,
+        formItem: <Input disabled />,
+        included: oauth.enabled && !isNewUser,
+      },
+      {
+        name: "alink",
+        label: gettext("Authorization link"),
+        formItem: <UserWidgetAlinkToken />,
+        included: settings.alink,
+      },
+      {
+        name: "disabled",
+        label: gettext("Disabled"),
+        valuePropName: "checked",
+        formItem: <Checkbox />,
+      },
+      {
+        name: "member_of",
+        label: gettext("Groups"),
+        formItem: <PrincipalSelect model="group" multiple editOnClick />,
+      },
+      {
+        name: "permissions",
+        label: gettext("Permissions"),
+        formItem: <PermissionSelect multiple />,
+      },
+      {
+        name: "language",
+        label: gettext("Language"),
+        formItem: <LanguageSelect />,
+      },
+      {
+        name: "description",
+        label: gettext("Description"),
+        formItem: <Input.TextArea />,
+      },
+    ];
+  }, [isNewUser, showFullColumns]);
+
+  const infoNGID = useMemo(
+    () =>
+      oauth.isNGID &&
+      isNewUser && (
+        <Alert
+          type="info"
+          style={{ marginBottom: "1ex" }}
+          title={msgConsiderAddingToTeam}
+          action={makeTeamManageButton()}
+        />
+      ),
+    [isNewUser]
+  );
+  if (isLoading) {
+    return <LoadingWrapper />;
+  }
+
+  const model: Model = {
+    browse: "auth.user.browse",
+    collection: "auth.user.collection",
+    edit: "auth.user.edit",
+    item: "auth.user.item",
+  };
+
+  return (
+    <div className="ngw-auth-user-widget">
+      {infoNGID}
+      <ModelForm
+        fields={fields}
+        initialValues={{
+          member_of:
+            group && isNewUser
+              ? group.filter((g) => g.register).map((g) => g.id)
+              : [],
+          permissions: [],
+          language: null,
+        }}
+        readonly={readonly}
+        model={model}
+        id={id}
+        messages={messages}
+      />
+    </div>
+  );
+}

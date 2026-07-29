@@ -1,0 +1,403 @@
+from datetime import date, datetime, time
+from unittest.mock import ANY
+
+import pytest
+from osgeo import ogr, osr
+
+from nextgisweb.core.exception import ValidationError
+from nextgisweb.feature_layer import FIELD_TYPE
+from nextgisweb.feature_layer.test import FeatureLayerAPI, parametrize_versioning
+from nextgisweb.pyramid.test import WebTestApp
+from nextgisweb.resource.test import ResourceAPI
+
+from .. import VectorLayer
+from ..ogrloader import ERROR_LIMIT, FID_SOURCE, FIX_ERRORS
+
+pytestmark = pytest.mark.usefixtures("ngw_resource_defaults", "ngw_auth_administrator")
+
+
+def test_from_fields(ngw_txn):
+    res = VectorLayer(geometry_type="POINT")
+    res.setup_from_fields(
+        [
+            dict(keyname="integer", datatype=FIELD_TYPE.INTEGER),
+            dict(keyname="bigint", datatype=FIELD_TYPE.BIGINT),
+            dict(keyname="real", datatype=FIELD_TYPE.REAL),
+            dict(keyname="string", datatype=FIELD_TYPE.STRING, label_field=True),
+            dict(keyname="date", datatype=FIELD_TYPE.DATE),
+            dict(keyname="time", datatype=FIELD_TYPE.TIME),
+            dict(keyname="datetime", datatype=FIELD_TYPE.DATETIME),
+            dict(keyname="boolean", datatype=FIELD_TYPE.BOOLEAN),
+            dict(keyname="json", datatype=FIELD_TYPE.JSON),
+        ]
+    )
+
+    res.persist()
+
+    assert res.feature_label_field.keyname == "string"
+
+
+def test_none_geometry_api(ngw_webtest_app: WebTestApp):
+    rapi = ResourceAPI(ngw_webtest_app)
+
+    res_id = rapi.create(
+        "vector_layer",
+        {
+            "vector_layer": {
+                "geometry_type": "NONE",
+                "fields": [{"keyname": "value", "datatype": "INTEGER", "display_name": "Value"}],
+            }
+        },
+    )
+
+    data = rapi.read(res_id)
+    assert data["vector_layer"]["geometry_type"] == "NONE"
+    assert data["feature_layer"]["srs"] is None
+
+    fapi = FeatureLayerAPI(res_id)
+
+    fid = fapi.feature_create({"fields": {"value": 42}})["id"]
+
+    feature = fapi.feature_get(fid)
+    assert feature["fields"]["value"] == 42
+    assert feature["geom"] is None
+
+    fapi.feature_update(fid, {"fields": {"value": 99}})
+    assert fapi.feature_get(fid)["fields"]["value"] == 99
+
+    assert len(fapi.feature_list()) == 1
+
+    rapi.update(res_id, {"vector_layer": {"delete_all_features": True}})
+    assert len(fapi.feature_list()) == 0
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "shapefile-point-utf8.zip",
+        "shapefile-point-win1251.zip",
+        "layer.geojson",
+    ),
+)
+def test_from_ogr(filename, ngw_txn, ngw_data_path):
+    res = VectorLayer().persist().from_ogr(ngw_data_path / filename)
+    features = list(res.feature_query()())
+    assert len(features) == 1
+
+    feature = features[0]
+    assert feature.id == 1
+
+    fields = feature.fields
+    assert fields["int"] == -1
+    assert fields["date"] == date(2001, 1, 1)
+    # TODO: Time and datetime tests fails on shapefile
+    # assert fields['time'] == time(23, 59, 59)
+    # assert fields['datetime'] == datetime(2001, 1, 1, 23, 59, 0)
+    assert fields["string"] == "Foo bar"
+    assert (
+        fields["unicode"]
+        == "Значимость этих проблем настолько очевидна, что реализация намеченных плановых заданий требуют определения и уточнения."
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "layer-lon-lat.csv",
+        "layer-lon-lat.xlsx",
+    ),
+)
+def test_from_csv_xlsx(filename, ngw_txn, ngw_data_path):
+    res = VectorLayer().persist()
+    res.from_source(ngw_data_path / filename, source_filename=filename)
+
+    features = list(res.feature_query()())
+    assert len(features) == 1
+
+    feature = features[0]
+    assert feature.id == 1
+
+    fields = feature.fields
+    assert int(fields["int"]) == -1
+    assert fields["date"] == "2001/01/01"
+    assert fields["time"] == "23:59:59"
+    assert fields["datetime"] == "2001/01/01 23:59:00"
+    assert fields["string"] == "Foo bar"
+    assert (
+        fields["unicode"]
+        == "Значимость этих проблем настолько очевидна, что реализация намеченных плановых заданий требуют определения и уточнения."
+    )
+
+
+def test_type_geojson(ngw_txn, ngw_data_path):
+    src = ngw_data_path / "type.geojson"
+    res = VectorLayer().persist().from_ogr(src)
+
+    def field_as(f, n, t):
+        fidx = f.GetFieldIndex(n)
+        if f.IsFieldNull(fidx):
+            return None
+
+        attr = getattr(f, "GetFieldAs" + t)
+        result = attr(fidx)
+
+        if t in ("Date", "Time", "DateTime"):
+            result = [int(v) for v in result]
+
+        return result
+
+    dataset = ogr.Open(str(src))
+    layer = dataset.GetLayer(0)
+
+    for feat, ref in zip(res.feature_query()(), layer):
+        fields = feat.fields
+        assert fields["null"] == field_as(ref, "null", None)
+        assert fields["int"] == field_as(ref, "int", "Integer")
+        assert fields["int64"] == field_as(ref, "int64", "Integer64")
+        assert fields["real"] == field_as(ref, "real", "Double")
+        assert fields["date"] == date(*field_as(ref, "date", "DateTime")[0:3])
+        assert fields["time"] == time(*field_as(ref, "time", "DateTime")[3:6])
+        assert fields["datetime"] == datetime(*field_as(ref, "datetime", "DateTime")[0:6])
+        assert fields["string"] == field_as(ref, "string", "String")
+        assert fields["unicode"] == field_as(ref, "unicode", "String")
+        assert fields["boolean"] == bool(field_as(ref, "boolean", "Integer"))
+
+
+@pytest.mark.parametrize(
+    "fid_source, fid_field, id_expect",
+    (
+        ("SEQUENCE", [], 1),
+        ("FIELD", ["int", "not_exists"], -1),
+        ("AUTO", ["not_exists", "int"], -1),
+        ("AUTO", ["not_exists"], 1),
+    ),
+)
+def test_fid(fid_source, fid_field, id_expect, ngw_txn, ngw_data_path):
+    res = (
+        VectorLayer()
+        .persist()
+        .from_source(
+            ngw_data_path / "type.geojson",
+            fid_source=fid_source,
+            fid_field=fid_field,
+        )
+    )
+
+    query = res.feature_query()
+    query.filter_by(id=id_expect)
+    assert query().total_count == 1
+
+
+def test_source_layer(
+    ngw_webtest_app: WebTestApp,
+    ngw_file_upload,
+    ngw_data_path,
+):
+    rapi = ResourceAPI()
+    upload_meta = ngw_file_upload(ngw_data_path / "two-layers.zip")
+
+    resp = ngw_webtest_app.post(
+        "/api/component/vector_layer/inspect",
+        json={"id": upload_meta["id"]},
+        status=200,
+    )
+
+    layers = resp.json["layers"]
+    assert layers == ["layer1", "layer2"]
+
+    res_id = rapi.create(
+        "vector_layer",
+        {
+            "vector_layer": {
+                "srs": {"id": 3857},
+                "source": upload_meta,
+                "source_layer": "layer1",
+                "fid_source": "AUTO",
+                "fid_field": "id",
+            },
+        },
+    )
+
+    fapi = FeatureLayerAPI(res_id)
+    assert fapi.feature_get(2)["fields"] == dict(name_point="Point two")
+
+    rapi.update(res_id, {"vector_layer": {"delete_all_features": True}})
+    fapi.feature_get(2, status=404)
+
+
+@parametrize_versioning()
+def test_copy(versioning, ngw_webtest_app: WebTestApp, ngw_file_upload, ngw_data_path):
+    rapi = ResourceAPI(ngw_webtest_app)
+    upload_meta = ngw_file_upload(ngw_data_path / "layer.geojson")
+    extensions = ["attachment", "description"]
+
+    src_id = rapi.create(
+        "vector_layer",
+        {
+            "feature_layer": {"versioning": {"enabled": versioning}},
+            "vector_layer": {"srs": {"id": 3857}, "source": upload_meta},
+        },
+    )
+
+    src_fapi = FeatureLayerAPI(src_id, extensions=extensions)
+
+    def _expected():
+        result = []
+        for i in src_fapi.feature_list():
+            if versioning:
+                i["vid"] = 1
+            if isinstance(i["extensions"]["attachment"], list):
+                for a in i["extensions"]["attachment"]:
+                    a.update(id=ANY, file_meta=ANY)
+            result.append(i)
+        return result
+
+    expected_v1 = _expected()
+
+    src_fapi.feature_update(
+        1,
+        dict(
+            extensions=dict(
+                attachment=[dict(file_upload=upload_meta)],
+                description="Example description",
+            )
+        ),
+    )
+
+    feature = src_fapi.feature_get(1)
+
+    assert feature["extensions"]["attachment"][0]["name"] == "layer.geojson"
+    assert feature["extensions"]["description"] == "Example description"
+
+    expected_v2 = _expected()
+
+    dst_id = rapi.create(
+        "vector_layer",
+        {
+            "feature_layer": {"versioning": {"enabled": versioning}},
+            "vector_layer": {
+                "srs": {"id": 3857},
+                "feature_layer": {"resource": {"id": src_id}},
+            },
+        },
+    )
+
+    dst_fapi = FeatureLayerAPI(dst_id, extensions=extensions)
+    assert dst_fapi.feature_list() == expected_v2
+
+    resp = dst_fapi.feature_create(dict())
+    assert resp["id"] == 2
+
+    if not versioning:
+        return
+
+    for version, expected in ((1, expected_v1), (2, expected_v2)):
+        dst_id = rapi.create(
+            "vector_layer",
+            {
+                "feature_layer": {"versioning": {"enabled": versioning}},
+                "vector_layer": {
+                    "srs": {"id": 3857},
+                    "feature_layer": {"resource": {"id": src_id}, "version": version},
+                },
+            },
+        )
+
+        dst_fapi = FeatureLayerAPI(dst_id, extensions=extensions)
+        assert dst_fapi.feature_list() == expected
+
+
+def test_geometry_type_change(ngw_webtest_app: WebTestApp, ngw_file_upload, ngw_data_path):
+    rapi = ResourceAPI(ngw_webtest_app)
+    upload_meta = ngw_file_upload(ngw_data_path / "pointz.geojson")
+
+    res_id = rapi.create(
+        "vector_layer",
+        {
+            "vector_layer": {
+                "source": upload_meta,
+                "srs": {"id": 3857},
+            },
+        },
+    )
+
+    assert rapi.read(res_id)["vector_layer"]["geometry_type"] == "POINTZ"
+
+    rapi.update_request(res_id, {"vector_layer": {"geometry_type": "LINESTRINGZ"}}, status=422)
+    rapi.update_request(res_id, {"vector_layer": {"geometry_type": "MULTIPOINT"}}, status=200)
+
+
+def test_replace_file(ngw_webtest_app: WebTestApp, ngw_file_upload, ngw_data_path):
+    rapi = ResourceAPI(ngw_webtest_app)
+    pointz_geojson = ngw_file_upload(ngw_data_path / "pointz.geojson")
+
+    res_id = rapi.create(
+        "vector_layer",
+        {
+            "vector_layer": {
+                "source": pointz_geojson,
+                "srs": {"id": 3857},
+            },
+        },
+    )
+
+    type_geojson = ngw_file_upload(ngw_data_path / "type.geojson")
+    rapi.update(res_id, {"vector_layer": {"source": type_geojson}})
+    assert rapi.read(res_id)["vector_layer"]["geometry_type"] == "POINT"
+
+
+def test_error_limit():
+    res = VectorLayer().persist()
+
+    ds = ogr.GetDriverByName("Memory").CreateDataSource("")
+
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+
+    layer = ds.CreateLayer("layer_with_errors", srs=srs, geom_type=ogr.wkbPoint)
+    defn = layer.GetLayerDefn()
+
+    some = 3
+
+    for i in range(ERROR_LIMIT + some):
+        feature = ogr.Feature(defn)
+        wkt = "POINTM (0 0 0)" if i < ERROR_LIMIT else "POINT (0 0)"
+        feature.SetGeometry(ogr.CreateGeometryFromWkt(wkt))
+        layer.CreateFeature(feature)
+
+    opts = dict(fix_errors=FIX_ERRORS.NONE)
+    with pytest.raises(ValidationError) as excinfo:
+        res.from_source(layer, **opts, skip_errors=False)
+    assert excinfo.value.detail is not None
+
+    res.from_source(layer, **opts, skip_errors=True)
+
+    assert res.feature_query()().total_count == some
+
+
+def test_geom_field(ngw_data_path):
+    res = VectorLayer().persist()
+    src = ngw_data_path / "geom-fld.geojson"
+    res.from_source(src)
+
+    query = res.feature_query()
+    feature = query().one()
+    assert feature.id == 1
+    assert list(feature.fields.keys()) == ["geom"]
+
+
+@pytest.mark.parametrize("data", ("int64", "id-non-uniq", "id-empty"))
+def test_id_field(data, ngw_data_path):
+    res = VectorLayer().persist()
+    src = ngw_data_path / f"{data}.geojson"
+
+    fid_params = dict(fid_source=FID_SOURCE.FIELD, fid_field=["id"])
+    with pytest.raises(ValidationError):
+        res.from_source(src, **fid_params)
+
+    res.from_source(src, fix_errors=FIX_ERRORS.SAFE, **fid_params)
+
+    query = res.feature_query()
+    feature = query().one()
+    assert feature.id == 1
+    assert list(feature.fields.keys()) == ["id"]

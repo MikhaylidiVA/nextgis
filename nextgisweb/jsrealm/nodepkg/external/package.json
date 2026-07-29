@@ -1,0 +1,16 @@
+{
+  "name": "@nextgisweb/external",
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "chai": "^4.3.10",
+    "mocha": "^11.7.6"
+  },
+  "nextgisweb": {
+    "rsbuildConfigs": {
+      "external": "rsbuild.external.ts"
+    }
+  }
+}

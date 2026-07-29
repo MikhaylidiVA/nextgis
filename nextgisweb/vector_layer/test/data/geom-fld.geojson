@@ -1,0 +1,14 @@
+{
+    "type": "FeatureCollection",
+    "name": "geom",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": { "geom": "blah-blah" },
+            "geometry": {
+                "type": "Point",
+                "coordinates": [ 0.0, 0.0 ]
+            }
+        }
+    ]
+}

@@ -1,0 +1,50 @@
+import type { ModalProps } from "@nextgisweb/gui/antd";
+import { LoadingWrapper } from "@nextgisweb/gui/component";
+import { FullHeightModal } from "@nextgisweb/gui/full-height-modal/FullHeightModal";
+import { useRouteGet } from "@nextgisweb/pyramid/hook";
+import { FeatureInfoSection } from "@nextgisweb/webmap/panel/identify/component/FeatureInfoSection";
+
+export interface FeatureDisplayModalProps extends ModalProps {
+  featureId: number;
+  resourceId: number;
+}
+
+export function FeatureDisplayModal({
+  open,
+  featureId,
+  resourceId,
+  onCancel,
+  ...modalProps
+}: FeatureDisplayModalProps) {
+  const { data: featureItem, isLoading } = useRouteGet(
+    "feature_layer.feature.item",
+    {
+      id: resourceId,
+      fid: featureId,
+    },
+    { query: { label: true, dt_format: "iso" } }
+  );
+
+  return (
+    <FullHeightModal
+      open={open}
+      destroyOnHidden
+      footer={null}
+      closable
+      onCancel={onCancel}
+      title={isLoading ? "..." : featureItem.label}
+      {...modalProps}
+    >
+      {isLoading ? (
+        <LoadingWrapper />
+      ) : (
+        <FeatureInfoSection
+          showGeometryInfo
+          showGeometryPreview
+          resourceId={resourceId}
+          featureItem={featureItem}
+        />
+      )}
+    </FullHeightModal>
+  );
+}

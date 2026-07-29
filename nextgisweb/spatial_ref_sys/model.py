@@ -1,0 +1,242 @@
+from typing import Annotated
+
+import sqlalchemy as sa
+import sqlalchemy.event as sa_event
+import sqlalchemy.orm as orm
+from msgspec import Meta, Struct
+from sqlalchemy.orm import declared_attr
+from zope.sqlalchemy import mark_changed
+
+from nextgisweb.env import Base, DBSession, gettext
+from nextgisweb.lib.osrhelper import SpatialReferenceError, sr_from_wkt
+
+from nextgisweb.auth import Permission
+from nextgisweb.core.exception import ValidationError
+
+SRID_MAX = 998999  # PostGIS maximum srid (srs.id)
+SRID_LOCAL = 990001  # First local srid (srs.id)
+
+WKT_EPSG_4326 = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]]'
+WKT_EPSG_3857 = 'PROJCS["WGS 84 / Pseudo-Mercator",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Mercator_1SP"],PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["X",EAST],AXIS["Y",NORTH],EXTENSION["PROJ4","+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs"],AUTHORITY["EPSG","3857"]]'
+
+BOUNDS_EPSG_4326 = (-180, -90, 180, 90)
+BOUNDS_EPSG_3857 = (-20037508.34, -20037508.34, 20037508.34, 20037508.34)
+
+SRSID = Annotated[
+    int,
+    Meta(ge=1, le=SRID_MAX, description="Spatial reference system ID"),
+    Meta(examples=[4326]),
+]
+
+
+class SRSRef(Struct, kw_only=True):
+    id: SRSID
+
+
+class SRS(Base):
+    __tablename__ = "srs"
+
+    id_seq = sa.Sequence(
+        "srs_id_seq",
+        metadata=Base.metadata,
+        start=SRID_LOCAL,
+        minvalue=SRID_LOCAL,
+        maxvalue=SRID_MAX,
+    )
+
+    id = sa.Column(
+        sa.Integer,
+        id_seq,
+        primary_key=True,
+        autoincrement=False,
+        server_default=id_seq.next_value(),
+    )
+    display_name = sa.Column(sa.Unicode, nullable=False)
+    auth_name = sa.Column(sa.Unicode)  # NULL auth_* used for
+    auth_srid = sa.Column(sa.Integer)  # custom local projection
+    wkt = sa.Column(sa.Unicode, nullable=False)
+    wkt_short = sa.Column(
+        sa.Unicode, nullable=False
+    )  # https://lists.osgeo.org/pipermail/postgis-users/2025-May/046787.html
+    proj4 = sa.Column(sa.Unicode, nullable=False)
+    minx = sa.Column(sa.Float)
+    miny = sa.Column(sa.Float)
+    maxx = sa.Column(sa.Float)
+    maxy = sa.Column(sa.Float)
+    catalog_id = sa.Column(sa.Integer, unique=True)
+
+    class permissions:
+        view = Permission("view", gettext("Spatial reference systems"), "view")
+        manage = Permission("manage", gettext("Spatial reference systems"), "manage")
+        all = (view, manage)
+
+    __table_args__ = (
+        sa.CheckConstraint("id > 0 AND id <= %d" % SRID_MAX, name="srs_id_check"),
+        sa.CheckConstraint(
+            "(auth_name IS NULL AND auth_srid IS NULL) "
+            "OR (auth_name IS NOT NULL AND auth_srid IS NOT NULL)",
+            name="srs_auth_check",
+        ),
+        sa.UniqueConstraint("auth_name", "auth_srid", name="srs_auth_unique"),
+    )
+
+    @orm.validates("wkt")
+    def _validate_wkt(self, key, value):
+        try:
+            sr = sr_from_wkt(value)
+        except SpatialReferenceError:
+            raise ValidationError(message=gettext("Invalid OGC WKT definition!"))
+
+        self.proj4 = sr.ExportToProj4()
+
+        if len(value) <= (wkt_maxlen := 2048):
+            wkt_short = value
+        else:
+            wkt_short = sr.ExportToWkt()
+            if len(wkt_short) > wkt_maxlen:
+                raise ValidationError(
+                    f"OGC WKT definition cannot be longer than {wkt_maxlen} characters."
+                )
+        self.wkt_short = wkt_short
+
+        return value
+
+    @property
+    def is_geographic(self):
+        return bool(self.to_osr().IsGeographic())
+
+    @property
+    def _zero_level_numtiles_x(self):
+        return 2 if self.is_geographic else 1
+
+    @property
+    def _zero_level_numtiles_y(self):
+        return 1
+
+    def _tile_step_x(self, z):
+        return (self.maxx - self.minx) / (2**z) / self._zero_level_numtiles_x
+
+    def _tile_step_y(self, z):
+        return (self.maxy - self.miny) / (2**z) / self._zero_level_numtiles_y
+
+    def tile_extent(self, tile):
+        z, x, y = tile
+
+        return (
+            self.minx + x * self._tile_step_x(z),
+            self.maxy - (y + 1) * self._tile_step_y(z),
+            self.minx + (x + 1) * self._tile_step_x(z),
+            self.maxy - y * self._tile_step_y(z),
+        )
+
+    def tile_center(self, tile):
+        extent = self.tile_extent(tile)
+        return (
+            (extent[0] + extent[2]) / 2,
+            (extent[1] + extent[3]) / 2,
+        )
+
+    def _point_tilexy(self, px, py, ztile):
+        return (
+            (px - self.minx) / self._tile_step_x(ztile),
+            (self.maxy - py) / self._tile_step_y(ztile),
+        )
+
+    def extent_tile_range(self, extent, ztile):
+        xtile_min, ytile_max = self._point_tilexy(extent[0], extent[1], ztile)
+        xtile_max, ytile_min = self._point_tilexy(extent[2], extent[3], ztile)
+
+        E = 1e-6
+        if xtile_min % 1 > 1 - E:
+            xtile_min += 1
+        if ytile_min % 1 > 1 - E:
+            ytile_min += 1
+        if xtile_max % 1 < E:
+            xtile_max -= 1
+        if ytile_max % 1 < E:
+            ytile_max -= 1
+
+        return [int(xtile_min), int(ytile_min), int(xtile_max), int(ytile_max)]
+
+    def to_osr(self):
+        return sr_from_wkt(self.wkt)
+
+    def __str__(self):
+        return self.display_name
+
+    @property
+    def system(self):
+        # EPSG:3857 and EPSG:4326 are special and cannot be deleted.
+        return self.id in (3857, 4326)
+
+    @property
+    def protected(self):
+        return bool(self.auth_name or self.auth_srid or self.catalog_id)
+
+
+# fmt: off
+sa_event.listen(SRS.__table__, "after_create", sa.DDL("""
+    CREATE OR REPLACE FUNCTION srs_spatial_ref_sys_sync() RETURNS TRIGGER
+    LANGUAGE 'plpgsql' AS $BODY$
+    BEGIN
+        IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+            -- Update existing spatial_ref_sys row
+            UPDATE spatial_ref_sys SET
+            auth_name = NEW.auth_name, auth_srid = NEW.auth_srid,
+            srtext = NEW.wkt_short, proj4text = NEW.proj4
+            WHERE srid = NEW.id;
+
+            -- Insert if missing
+            INSERT INTO spatial_ref_sys (srid, auth_name, auth_srid, srtext, proj4text)
+            SELECT NEW.id, NEW.auth_name, NEW.auth_srid, NEW.wkt_short, NEW.proj4
+            WHERE NOT EXISTS(SELECT * FROM spatial_ref_sys WHERE srid = NEW.id);
+
+            RETURN NEW;
+        END IF;
+
+        IF TG_OP = 'DELETE' THEN
+            -- Delete existing row
+            DELETE FROM spatial_ref_sys WHERE srid = OLD.id;
+            RETURN OLD;
+        END IF;
+
+    END
+    $BODY$;
+
+    TRUNCATE TABLE spatial_ref_sys;
+
+    DROP TRIGGER IF EXISTS spatial_ref_sys ON srs;
+    CREATE TRIGGER spatial_ref_sys AFTER INSERT OR UPDATE OR DELETE ON srs
+        FOR EACH ROW EXECUTE PROCEDURE srs_spatial_ref_sys_sync();
+
+"""), propagate=True)
+
+
+sa_event.listen(SRS.__table__, 'after_drop', sa.DDL("""
+    DROP FUNCTION IF EXISTS srs_spatial_ref_sys_sync();
+"""), propagate=True)
+# fmt: on
+
+
+class SRSMixin:
+    @declared_attr
+    def srs_id(cls):
+        return sa.Column(sa.Integer, sa.ForeignKey(SRS.id), nullable=False)
+
+    @declared_attr
+    def srs(cls):
+        return orm.relationship("SRS", lazy="joined")
+
+
+def synchronize_postgis_spatial_ref_sys():
+    """Force PostGIS spatial_ref_sys table synchronization"""
+
+    # Delete all existing records and do update to run the synchronizaion
+    # trigger function. It will add missing rows.
+    query = f"""
+        TRUNCATE spatial_ref_sys;
+        UPDATE {SRS.__tablename__} SET id = id;
+    """
+
+    DBSession.connection().execute(sa.text(query))
+    mark_changed(DBSession())

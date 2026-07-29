@@ -1,0 +1,42 @@
+.ngw-pyramid-menu-icon {
+  display: inline-block;
+  position: relative;
+  vertical-align: middle;
+  cursor: pointer;
+  border-radius: 2px;
+  width: 32px;
+  height: 32px;
+  color: var(--primary);
+  line-height: 32px;
+  text-align: center;
+
+  > svg.icon {
+    color: inherit;
+    font-size: 32px;
+  }
+
+  > span.main {
+    color: inherit;
+    line-height: 34px;
+  }
+
+  > span.more {
+    display: block;
+    position: absolute;
+    top: -9.5px;
+    right: 0px;
+
+    > svg.icon {
+      font-size: 10px;
+      line-height: 1;
+    }
+
+    &-success {
+      color: var(--success);
+    }
+
+    &-danger {
+      color: var(--danger);
+    }
+  }
+}

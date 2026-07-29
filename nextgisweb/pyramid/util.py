@@ -1,0 +1,160 @@
+import re
+import secrets
+import string
+from calendar import timegm
+from collections import defaultdict
+from collections.abc import Sequence
+from functools import cache
+from pathlib import Path
+from threading import Thread
+from time import sleep
+from typing import Any, Literal
+
+from babel import Locale
+from babel.core import UnknownLocaleError
+
+from nextgisweb.lib.logging import logger
+
+
+def viewargs(
+    *,
+    renderer: str | None = None,
+    query_params: Sequence[tuple[str, Any] | tuple[str, Any, Any]] | None = None,
+):
+    def wrap(func):
+        if renderer is not None:
+            func.__pyramid_renderer__ = renderer
+        if query_params is not None:
+            func.__pyramid_query_params__ = query_params
+        return func
+
+    return wrap
+
+
+class StaticMap:
+    def __init__(self):
+        def node():
+            res = defaultdict(node)
+            res[None] = None
+            return res
+
+        self.data = node()
+
+    def add(self, uri, path):
+        n = self.data
+        for p in uri.split("/"):
+            n = n[p]
+        n[None] = path
+
+    def lookup(self, subpath) -> Path:
+        n = self.data
+        u = list(subpath)
+        while True:
+            try:
+                h = u.pop(0)
+            except IndexError:
+                raise KeyError
+            if h in n:
+                n = n[h]
+            else:
+                if p := n[None]:
+                    return p / h / "/".join(u)
+                else:
+                    raise KeyError
+
+
+class StaticSourcePredicate:
+    def __init__(self, value, config):
+        assert value is True
+        self.value = value
+
+    def text(self):
+        return "static_source"
+
+    phash = __repr__ = text
+
+    def __call__(self, context, request):
+        subpath = context["match"]["subpath"]
+        static_map = request.registry.settings["pyramid.static_map"]
+
+        try:
+            path = static_map.lookup(subpath)
+        except KeyError:
+            return False
+        else:
+            request.environ["static_path"] = path
+            return True
+
+
+def gensecret(length):
+    symbols = string.ascii_letters + string.digits
+    return "".join([secrets.choice(symbols) for i in range(length)])
+
+
+def datetime_to_unix(dt):
+    return timegm(dt.timetuple())
+
+
+origin_pattern = re.compile(r"^(https?)://(\*\.)?([\w\-\.]{3,})(:\d{2,5})?/?$")
+
+
+def parse_origin(url):
+    m = origin_pattern.match(url)
+    if m is None:
+        raise ValueError("Invalid origin.")
+    scheme, wildcard, domain, port = m[1], m[2], m[3], m[4]
+    domain = domain.rstrip(".")
+    is_wildcard = wildcard is not None
+    if is_wildcard:
+        domain = wildcard + domain
+    return is_wildcard, scheme, domain, port
+
+
+@cache
+def get_text_direction(code: str) -> Literal["ltr", "rtl"]:
+    try:
+        locale = Locale.parse(code, sep="-")
+    except UnknownLocaleError:
+        return "ltr"
+    return locale.text_direction  # ty:ignore[invalid-return-type]
+
+
+def set_output_buffering(request, response, value, *, strict=False):
+    if value is None:
+        return
+
+    opts = request.env.pyramid.options
+    default = opts["response_buffering"]
+    if value == default:
+        return
+
+    x_accel_buffering = opts["x_accel_buffering"]
+    if x_accel_buffering:
+        response.headers["X-Accel-Buffering"] = "yes" if value else "no"
+    elif strict:
+        raise RuntimeError("Failed to set output buffering")
+
+
+def restart_delayed(delay: int = 5):
+    try:
+        import uwsgi
+    except ImportError:
+        uwsgi = None
+
+    if uwsgi:
+        impl = uwsgi.reload
+    else:
+        import hupper
+
+        if hupper.is_active():
+            impl = hupper.get_reloader().trigger_reload
+        else:
+            raise NotImplementedError
+
+    def target():
+        logger.info("Reloading in %d seconds...", delay)
+        sleep(delay)
+        impl()
+
+    thr = Thread(target=target, daemon=False)
+    thr.start()

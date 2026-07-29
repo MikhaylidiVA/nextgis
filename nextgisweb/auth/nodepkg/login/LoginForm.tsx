@@ -1,0 +1,151 @@
+import { observer } from "mobx-react-lite";
+import { useEffect, useMemo, useState } from "react";
+
+import { Alert, Button, Form, Input } from "@nextgisweb/gui/antd";
+import { errorModal } from "@nextgisweb/gui/error";
+import { FieldsForm } from "@nextgisweb/gui/fields-form";
+import type { FormField } from "@nextgisweb/gui/fields-form";
+import { useKeydownListener } from "@nextgisweb/gui/hook";
+import { BaseAPIError, routeURL } from "@nextgisweb/pyramid/api";
+import pyramidSettings from "@nextgisweb/pyramid/client-settings";
+import { gettext, gettextf } from "@nextgisweb/pyramid/i18n";
+
+import oauth from "../oauth";
+import { authStore } from "../store";
+
+import type { Credentials, CredsOnChangeOptions, LoginFormProps } from "./type";
+
+import LoginIcon from "@nextgisweb/icon/material/login";
+
+import "./LoginForm.less";
+
+const msgOauth = gettextf("Sign in with {}")(oauth.name);
+const msgTitle = gettext("Sign in to Web GIS");
+const msgSignIn = gettext("Sign in");
+
+const isLoginLocation = location.pathname === routeURL("auth.login");
+const { contactAdministratorUrl } = pyramidSettings;
+
+export const LoginForm = observer((props: LoginFormProps) => {
+  const [creds, setCreds] = useState<Credentials>({
+    login: "",
+    password: "",
+  });
+
+  const form = Form.useForm()[0];
+  const queryParams = new URLSearchParams(location.search);
+  const nextQueryParam = queryParams.get("next");
+
+  const fields = useMemo<FormField<keyof Credentials>[]>(
+    () => [
+      {
+        name: "login",
+        formItem: <Input placeholder={gettext("Login")} />,
+        required: true,
+      },
+      {
+        name: "password",
+        formItem: <Input.Password placeholder={gettext("Password")} />,
+        required: true,
+      },
+    ],
+    []
+  );
+
+  useEffect(() => {
+    if (props && props.onChange) {
+      props.onChange(creds);
+    }
+  }, [creds, props]);
+
+  const onChange = (e: CredsOnChangeOptions) => {
+    setCreds((oldVal) => ({ ...oldVal, ...e.value }));
+  };
+
+  const login = async () => {
+    try {
+      await form.validateFields();
+    } catch {
+      return;
+    }
+
+    try {
+      const resp = await authStore.login(creds);
+      if (props.reloadAfterLogin) {
+        location.replace(location.href);
+      } else {
+        // Query next param takes precedence over user's home URL.
+        const next = nextQueryParam || resp.home_url || location.origin;
+        window.open(next, "_self");
+      }
+    } catch (err) {
+      // authStore handles BaseAPIError
+      if (!(err instanceof BaseAPIError)) {
+        errorModal(err);
+      }
+    }
+  };
+
+  useKeydownListener("enter", login);
+
+  let oauthNext;
+  if (nextQueryParam) {
+    oauthNext = nextQueryParam;
+  } else if (!isLoginLocation) {
+    oauthNext = location.href;
+  }
+
+  const oauthUrl =
+    routeURL("auth.oauth") +
+    (oauthNext ? "?" + new URLSearchParams({ next: oauthNext }) : "");
+
+  return (
+    <div className="ngw-auth-login-form">
+      <h1>{msgTitle}</h1>
+
+      {oauth.enabled && (
+        <>
+          <Button className="oauth" type="primary" size="large" href={oauthUrl}>
+            {msgOauth}
+          </Button>
+          <div className="separator">
+            <span>{gettext("or using login and password")}</span>
+          </div>
+        </>
+      )}
+
+      <div className="login-password">
+        {authStore.loginError && (
+          <Alert type="error" title={authStore.loginError} />
+        )}
+        <FieldsForm
+          form={form}
+          size="large"
+          fields={fields}
+          onChange={onChange}
+        />
+      </div>
+
+      <Button
+        className="signin-button"
+        type="primary"
+        size="large"
+        icon={<LoginIcon />}
+        loading={authStore.isLogining}
+        onClick={login}
+      >
+        {msgSignIn}
+      </Button>
+
+      {contactAdministratorUrl && (
+        <div className="contact-administrator">
+          <a href={contactAdministratorUrl} target="_blank">
+            {gettext("Contact administrator")}
+          </a>
+        </div>
+      )}
+    </div>
+  );
+});
+
+// LoginForm.displayName = "LoginForm";

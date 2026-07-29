@@ -1,0 +1,294 @@
+import type { FC } from "react";
+
+import type { FeatureLayerFieldRead } from "@nextgisweb/feature-layer/type/api";
+import { gettext } from "@nextgisweb/pyramid/i18n";
+
+import type { ValueInput } from "./component/FilterCondition";
+
+export type FilterExpressionString = string & {
+  readonly __brand: "FilterExpressionString";
+};
+
+export interface FilterValueWidgetProps {
+  field: ResolvedFieldRef;
+  value: unknown;
+  operator: Operator;
+  disabled: boolean;
+  placeholder?: string;
+  onChange: (value: ValueInput) => void;
+}
+
+export type FilterValueWidgetComponent = FC<FilterValueWidgetProps>;
+
+export interface FeatureFilterEditorProps {
+  fields: FeatureLayerFieldRead[];
+  resourceId?: number;
+  value?: FilterExpressionString | undefined;
+  valueWidget?: FilterValueWidgetComponent;
+  onChange?: (value: FilterExpressionString | undefined) => void;
+  onValidityChange?: (isValid: boolean) => void;
+  showFooter?: boolean;
+  onApply?: (value: FilterExpressionString | undefined) => void;
+  onCancel?: (value: FilterExpressionString | undefined) => void;
+}
+
+export interface FilterState {
+  rootGroup: FilterGroup;
+}
+
+export type ActiveTab = "constructor" | "json";
+
+export interface FilterGroup {
+  id: number;
+  type: "group";
+  operator: LogicalOp;
+  conditions: FilterCondition[];
+  groups: FilterGroup[];
+  childrenOrder: FilterGroupChild[];
+}
+
+export type FilterGroupChild =
+  | { type: "condition"; id: number }
+  | { type: "group"; id: number };
+
+export type AttributeFieldRef = {
+  kind: "field";
+  keyname: string;
+};
+
+export type VirtualOperandExprMap = {
+  fid: ["fid"];
+};
+
+export type VirtualOperandId = keyof VirtualOperandExprMap;
+export type VirtualOperandExpr = VirtualOperandExprMap[VirtualOperandId];
+
+export type VirtualFieldRef = {
+  kind: "virtual";
+  id: VirtualOperandId;
+};
+
+export type FieldRef = AttributeFieldRef | VirtualFieldRef;
+
+export type FilterCondition<O extends Operator = Operator> = {
+  id: number;
+  type: "condition";
+  field: FieldRef;
+  operator: O;
+  value: OperatorValueMap[Operator];
+};
+
+export type GetExpr = ["get", string];
+export type FieldOperandExpr = GetExpr | VirtualOperandExpr;
+
+export type EqNeOp = "==" | "!=";
+export type CmpOp = ">" | "<" | ">=" | "<=";
+export type InOp = "in" | "!in";
+export type IsNullOp = "is_null" | "!is_null";
+export type IlikeOp = "ilike" | "!ilike";
+
+export type ConditionValue = string | number | boolean | null;
+
+export type EqNeExpr = [EqNeOp, FieldOperandExpr, ConditionValue];
+export type CmpExpr = [CmpOp, FieldOperandExpr, number | string];
+export type InExpr = [InOp, FieldOperandExpr, ...(string | number)[]];
+export type IsNullExpr = [IsNullOp, FieldOperandExpr];
+export type IlikeExpr = [IlikeOp, FieldOperandExpr, string];
+
+export type ConditionExpr =
+  | EqNeExpr
+  | CmpExpr
+  | InExpr
+  | IsNullExpr
+  | IlikeExpr;
+
+export type LogicalOp = "all" | "any";
+export type GroupExpr = [LogicalOp, ...(ConditionExpr | GroupExpr)[]];
+export type FilterExpression = [] | GroupExpr;
+
+export const ValidOperators = [
+  "==",
+  "!=",
+  ">",
+  "<",
+  ">=",
+  "<=",
+  "in",
+  "!in",
+  "is_null",
+  "!is_null",
+  "ilike",
+  "!ilike",
+] as const;
+
+export interface VirtualFieldDescriptor<
+  TId extends VirtualOperandId = VirtualOperandId,
+> {
+  id: TId;
+  label: string;
+  datatype: FeatureLayerFieldRead["datatype"];
+  toExpr: () => VirtualOperandExprMap[TId];
+  matchesExpr: (expr: unknown) => expr is VirtualOperandExprMap[TId];
+}
+
+export interface ResolvedFieldRef {
+  ref: FieldRef;
+  label: string;
+  datatype: FeatureLayerFieldRead["datatype"];
+  isVirtual: boolean;
+  lookupTable?: FeatureLayerFieldRead["lookup_table"];
+}
+
+export type Operator = (typeof ValidOperators)[number];
+
+export type OperatorValueMap = {
+  "==": ConditionValue;
+  "!=": ConditionValue;
+  ">": string | number;
+  "<": string | number;
+  ">=": string | number;
+  "<=": string | number;
+  "in": Array<string | number>;
+  "!in": Array<string | number>;
+  "is_null": undefined;
+  "!is_null": undefined;
+  "ilike": string;
+  "!ilike": string;
+};
+
+export interface OperatorOption {
+  value: Operator;
+  label: string;
+  supportedTypes: FeatureLayerFieldRead["datatype"][];
+}
+
+export const OPERATORS: OperatorOption[] = [
+  {
+    value: "==",
+    label: gettext("Equal"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+      "BOOLEAN",
+    ],
+  },
+  {
+    value: "!=",
+    label: gettext("Not equal"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+      "BOOLEAN",
+    ],
+  },
+  {
+    value: ">",
+    label: gettext("Greater"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+    ],
+  },
+  {
+    value: "<",
+    label: gettext("Less"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+    ],
+  },
+  {
+    value: ">=",
+    label: gettext("Greater or equal"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+    ],
+  },
+  {
+    value: "<=",
+    label: gettext("Less or equal"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+    ],
+  },
+  {
+    value: "in",
+    label: gettext("In list"),
+    supportedTypes: ["STRING", "INTEGER", "BIGINT", "REAL"],
+  },
+  {
+    value: "!in",
+    label: gettext("Not in list"),
+    supportedTypes: ["STRING", "INTEGER", "BIGINT", "REAL"],
+  },
+  {
+    value: "is_null",
+    label: gettext("Is NULL"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+      "BOOLEAN",
+    ],
+  },
+  {
+    value: "!is_null",
+    label: gettext("Is not NULL"),
+    supportedTypes: [
+      "STRING",
+      "INTEGER",
+      "BIGINT",
+      "REAL",
+      "DATE",
+      "TIME",
+      "DATETIME",
+      "BOOLEAN",
+    ],
+  },
+  {
+    value: "ilike",
+    label: gettext("Matches (case-insensitive)"),
+    supportedTypes: ["STRING"],
+  },
+  {
+    value: "!ilike",
+    label: gettext("Does not match (case-insensitive)"),
+    supportedTypes: ["STRING"],
+  },
+];

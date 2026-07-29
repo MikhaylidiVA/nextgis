@@ -1,0 +1,93 @@
+.ngw-gui-csv-importer {
+  display: grid;
+  grid-template-rows: min-content auto min-content min-content;
+  grid-template-columns: 1fr 2fr;
+  height: 100%;
+  min-height: 0;
+
+  > .mapping-title,
+  > .preview-title,
+  > .options-title {
+    padding-block: var(--theme-padding-sm);
+    font-weight: var(--theme-font-weight-strong);
+    font-size: var(--theme-font-size-lg);
+  }
+
+  > .ngw-file-upload-file-uploader {
+    grid-row: 1 / -1;
+    grid-column: 1 / -1;
+    height: 100%;
+  }
+
+  > .error,
+  > .spin {
+    display: flex;
+    grid-row: 1 / 3;
+    grid-column: 1 / -1;
+    justify-content: center;
+    align-items: center;
+  }
+
+  > .mapping-title {
+    grid-row: 1;
+    grid-column: 1;
+    border-inline-end: 1px solid var(--theme-color-border-secondary);
+    padding-inline-end: var(--theme-padding-sm);
+  }
+
+  > .mapping-wrapper {
+    grid-row: 2;
+    grid-column: 1;
+    border-inline-end: 1px solid var(--theme-color-border-secondary);
+    padding-inline-end: var(--theme-padding-sm);
+    min-height: 0;
+  }
+
+  > .preview-title {
+    grid-row: 1;
+    grid-column: 2;
+    padding-inline-start: var(--theme-padding-sm);
+  }
+
+  > .preview-wrapper {
+    display: flex;
+    grid-row: 2;
+    grid-column: 2;
+    flex-direction: column;
+    padding-inline-start: var(--theme-padding-sm);
+
+    > .ngw-gui-csv-importer-preview {
+      flex: 1 1 0;
+      border: 1px solid var(--theme-color-border-secondary);
+      border-radius: var(--theme-border-radius);
+      min-height: 0;
+    }
+
+    > .file {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--theme-padding-xs);
+      margin-block: var(--theme-padding-xs);
+
+      > .name {
+        flex: 1 0 0;
+        min-width: 0;
+        overflow: hidden;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+  }
+
+  > .options-title {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--theme-color-border-secondary);
+  }
+
+  > .ngw-gui-csv-importer-options {
+    grid-row: 4;
+    grid-column: 1 / -1;
+  }
+}

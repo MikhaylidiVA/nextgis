@@ -1,0 +1,221 @@
+import { useEffect, useEffectEvent, useState } from "react";
+import type { ReactNode } from "react";
+
+import { Button, Form, Popconfirm, Space, message } from "@nextgisweb/gui/antd";
+import type { FormInstance } from "@nextgisweb/gui/antd";
+import { LoadingWrapper, SaveButton } from "@nextgisweb/gui/component";
+import { errorModal, isAbortError } from "@nextgisweb/gui/error";
+import { FieldsForm } from "@nextgisweb/gui/fields-form";
+import type { FormField, FormProps } from "@nextgisweb/gui/fields-form";
+import { route, routeURL } from "@nextgisweb/pyramid/api";
+import type {
+  KeysWithMethodAndPath,
+  RouteName,
+} from "@nextgisweb/pyramid/api/type";
+import { useAbortController } from "@nextgisweb/pyramid/hook";
+import { gettext } from "@nextgisweb/pyramid/i18n";
+
+import { useKeydownListener } from "../hook/useKeydownListener";
+
+interface Messages {
+  deleteConfirm?: string;
+}
+
+export interface ModelFormCallbacks {
+  submit?: (result?: { id: number }) => void;
+  deleteModelItem?: () => void;
+}
+
+export interface Model {
+  item: KeysWithMethodAndPath<["get", "delete", "put"], ["id"]>;
+  collection: RouteName;
+  edit?: RouteName;
+  browse: RouteName;
+}
+
+interface ModelFormProps extends Omit<FormProps, "initialValues"> {
+  id?: number;
+  children?: ReactNode;
+  model: Model;
+  initialValues?: Record<string, unknown>;
+  fields: FormField[];
+  form?: FormInstance;
+  onChange?: (val: { value: unknown }) => void;
+  allowDelete?: boolean;
+  messages?: Messages;
+  readonly?: boolean;
+  callbacks?: ModelFormCallbacks;
+}
+
+const btnTitleAliases = {
+  create: gettext("Create"),
+  edit: gettext("Save"),
+  delete: gettext("Delete"),
+};
+
+export function ModelForm(props: ModelFormProps) {
+  const {
+    id,
+    model: m,
+    fields,
+    initialValues: defaultValues,
+    children,
+    messages: msg,
+    allowDelete: allowDelete_,
+    readonly: readonly,
+    callbacks,
+    ...formProps
+  } = props;
+
+  const [messageApi, contextHolder] = message.useMessage();
+
+  const allowDelete = allowDelete_ ?? true;
+  const operation = id !== undefined ? "edit" : "create";
+
+  const messages = msg ?? {};
+  const deleteConfirm = (
+    <>{messages.deleteConfirm || gettext("Confirmation")}</>
+  );
+
+  const model: Model =
+    typeof m === "string"
+      ? ({
+          item: m + ".item",
+          collection: m + ".collection",
+          edit: m + ".edit",
+          browse: m + ".browse",
+        } as Model)
+      : m;
+
+  const form = Form.useForm(props.form)[0];
+  const { makeSignal } = useAbortController();
+
+  const [status, setStatus] = useState<
+    "loading" | "saving" | "deleting" | null
+  >("loading");
+  const [value, setValue] = useState({});
+
+  const submit = async () => {
+    setStatus("saving");
+    try {
+      const json = await form.validateFields();
+      const req =
+        id !== undefined
+          ? route(model.item, id).put
+          : route(model.collection).post;
+      try {
+        const result = await req({ json });
+        if (callbacks?.submit) {
+          callbacks.submit(
+            result && typeof result === "object" && "id" in result
+              ? { id: Number((result as { id: number }).id) }
+              : undefined
+          );
+        } else {
+          const url = routeURL(model.browse);
+          window.open(url, "_self");
+        }
+      } catch (err) {
+        errorModal(err);
+      }
+    } catch {
+      messageApi.error(gettext("Fix the form errors first"));
+    } finally {
+      setStatus(null);
+    }
+  };
+
+  const deleteModelItem = async () => {
+    if (id === undefined) {
+      return;
+    }
+
+    setStatus("deleting");
+
+    try {
+      await route(model.item, id).delete();
+      if (callbacks?.deleteModelItem) {
+        callbacks.deleteModelItem();
+      } else {
+        const url = routeURL(model.browse);
+        window.open(url, "_self");
+      }
+    } catch (err) {
+      errorModal(err);
+    } finally {
+      setStatus(null);
+    }
+  };
+
+  const setInitialValues = useEffectEvent(async () => {
+    setStatus("loading");
+    const initialValues: Record<string, unknown> = {};
+    if (id) {
+      try {
+        const resp = await route(model.item, id).get({
+          signal: makeSignal(),
+        });
+        Object.assign(initialValues, resp);
+        if (formProps.onChange) {
+          formProps.onChange({ value: initialValues });
+        }
+      } catch (err) {
+        if (isAbortError(err)) return;
+        // model item is not exist handler
+      }
+    }
+    for (const [name, defaultValue] of Object.entries(defaultValues ?? {})) {
+      if (defaultValue !== undefined && initialValues[name] === undefined) {
+        if (typeof defaultValue === "function") {
+          initialValues[name] = defaultValue(initialValues);
+        } else {
+          initialValues[name] = defaultValue;
+        }
+      }
+    }
+    setValue(initialValues);
+
+    setStatus(null);
+  });
+
+  useKeydownListener("Enter", submit);
+
+  useEffect(() => {
+    setInitialValues();
+  }, []);
+
+  if (status === "loading") {
+    return <LoadingWrapper />;
+  }
+
+  return (
+    <Space orientation="vertical" style={{ width: "100%" }}>
+      {contextHolder}
+      <FieldsForm
+        initialValues={value}
+        fields={fields}
+        form={form}
+        disabled={readonly}
+        {...formProps}
+      >
+        {children}
+        {!readonly ? (
+          <Form.Item>
+            <Space>
+              <SaveButton onClick={submit} loading={status === "saving"}>
+                {btnTitleAliases[operation]}
+              </SaveButton>
+              {operation === "edit" && allowDelete ? (
+                <Popconfirm title={deleteConfirm} onConfirm={deleteModelItem}>
+                  <Button danger>{btnTitleAliases["delete"]}</Button>
+                </Popconfirm>
+              ) : (
+                ""
+              )}
+            </Space>
+          </Form.Item>
+        ) : null}
+      </FieldsForm>
+    </Space>
+  );
+}

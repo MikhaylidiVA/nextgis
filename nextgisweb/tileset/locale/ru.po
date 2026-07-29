@@ -1,0 +1,55 @@
+#: model.py:87
+msgid "Tilesets"
+msgstr "Наборы тайлов"
+
+#: model.py:91
+msgid "Tile {} unsupported."
+msgstr "Тайл {} не поддерживается."
+
+#: model.py:126 nodepkg/resource-widget/Widget.tsx:34
+msgid "Tileset"
+msgstr "Набор тайлов"
+
+#: model.py:211
+msgid "Number of tiles"
+msgstr "Количество тайлов"
+
+#: model.py:213
+msgid "Zoom levels"
+msgstr "Масштабные уровни"
+
+#: model.py:214
+msgid "From {min} to {max}"
+msgstr "От {min} до {max}"
+
+#: model.py:249
+msgid "Tiles '{}' and '{}' are located in different subdirectories."
+msgstr "Тайлы '{}' и '{}' расположены в разных поддиректориях."
+
+#: model.py:255
+msgid "Tiles '{}' and '{}' have different extensions."
+msgstr "У тайлов '{}' и '{}' разные расширения."
+
+#: model.py:316 model.py:352
+msgid "Unsupported data format."
+msgstr "Неподдерживаемый формат данных."
+
+#: model.py:357
+msgid "Only 256x256 px tiles are supported."
+msgstr "Поддерживаются только тайлы размера 256x256 пикселей."
+
+#: model.py:378
+msgid "No tiles found in source."
+msgstr "В исходном файле нет тайлов."
+
+#: nodepkg/resource-widget/Widget.tsx:12
+msgid "Select a tileset"
+msgstr "Выберите набор тайлов"
+
+#: nodepkg/resource-widget/Widget.tsx:13
+msgid ""
+"MBTiles and ZIP archives of tiles are supported. Tiles should be in PNG or "
+"JPEG format and have a size of 256x256 pixels."
+msgstr ""
+"Поддерживаются MBTiles и ZIP-архивы с тайлами. Тайлы должны быть в формате "
+"PNG или JPEG и иметь размер 256x256 пикселей."

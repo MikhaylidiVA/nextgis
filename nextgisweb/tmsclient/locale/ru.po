@@ -1,0 +1,97 @@
+#: model.py:47 nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:115
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:113
+msgid "TMS connection"
+msgstr "Соединение TMS"
+
+#: model.py:109
+msgid "API key required."
+msgstr "API ключ является обязательным."
+
+#: model.py:151
+msgid "Zoom is out of range."
+msgstr "Масштаб вне диапазона"
+
+#: model.py:159 nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:195
+msgid "TMS layer"
+msgstr "Слой TMS"
+
+#: model.py:304
+msgid "Layer name required."
+msgstr "Имя слоя является обязательным."
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:28
+msgid "Type"
+msgstr "Тип"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:36
+msgid "Custom"
+msgstr "Настраиваемый"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:47
+msgid "URL template"
+msgstr "Шаблон URL"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:53
+msgid "Scheme"
+msgstr "Схема"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:64
+msgid "API key"
+msgstr "Ключ API"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:70
+msgid "API key param"
+msgstr "Параметр ключа API"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:77
+msgid "Username"
+msgstr "Пользователь"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:87
+msgid "Password"
+msgstr "Пароль"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:97
+msgid "Referer header"
+msgstr "Заголовок Referer"
+
+#: nodepkg/tmsclient-connection/TmsClientConnectionWidget.tsx:106
+msgid "Skip SSL/TLS certificate verification"
+msgstr "Не проверять сертификат SSL/TLS"
+
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:32
+msgid "This connection based on NextGIS Geoservices"
+msgstr "Это подключение к NextGIS Geoservices"
+
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:140
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:151
+msgid "Layer"
+msgstr "Имя слоя"
+
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:159
+msgid "Min zoom level"
+msgstr "Мин. зум"
+
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:167
+msgid "Max zoom level"
+msgstr "Макс. зум"
+
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:175
+msgid "Tile size"
+msgstr "Размер тайла"
+
+#: nodepkg/tmsclient-layer/TmsClientLayerWidget.tsx:185
+msgid "Extent"
+msgstr "Охват"
+
+#: tile_fetcher.py:36
+msgid "The remote server did not respond in time."
+msgstr "Удаленный сервер не ответил вовремя."
+
+#: tile_fetcher.py:86
+msgid "Unable to get a response from the remote server."
+msgstr "Не удалось получить ответ от удаленного сервера."
+
+#: tile_fetcher.py:96
+msgid "An unexpected HTTP status code was received from the remote server."
+msgstr "От удаленного сервера получен неожиданный код статуса HTTP."

@@ -1,0 +1,347 @@
+import warnings
+from dataclasses import dataclass
+from typing import Annotated
+
+import zope.event
+import zope.event.classhandler
+from msgspec import Meta
+from pyramid.httpexceptions import HTTPFound
+from sqlalchemy.exc import NoResultFound
+from sqlalchemy.orm import joinedload, with_polymorphic
+
+from nextgisweb.env import DBSession, gettext
+
+from nextgisweb.auth import OnUserLogin
+from nextgisweb.core.exception import InsufficientPermissions
+from nextgisweb.gui import react_renderer
+from nextgisweb.jsrealm import jsentry
+from nextgisweb.pyramid import JSONType
+from nextgisweb.pyramid.breadcrumb import Breadcrumb
+
+from .exception import ResourceNotFound
+from .extaccess import ExternalAccessLink
+from .interface import IResourceBase
+from .model import Resource, ResourceID
+from .permission import Permission, Scope
+from .psection import PageSections
+from .scope import ResourceScope
+
+RESOURCE_FILTER_JSENTRY = jsentry("@nextgisweb/resource/resources-filter")
+
+
+class ResourceFactory:
+    def __init__(self, *, key="id", context=None):
+        self.key = key
+        self.context = context
+
+    def __call__(self, request) -> Resource:
+        # First, load base class resource
+        res_id = request.path_param[self.key]
+        try:
+            (res_cls,) = DBSession.query(Resource.cls).where(Resource.id == res_id).one()
+        except NoResultFound:
+            raise ResourceNotFound(res_id)
+
+        polymorphic = with_polymorphic(Resource, [Resource.registry[res_cls]])
+        obj = (
+            DBSession.query(polymorphic)
+            .options(
+                joinedload(polymorphic.owner_user),
+                joinedload(polymorphic.parent),
+            )
+            .where(polymorphic.id == res_id)
+            .one()
+        )
+
+        if context := self.context:
+            if issubclass(context, Resource):
+                if not isinstance(obj, context):
+                    raise ResourceNotFound(res_id)
+            elif issubclass(context, IResourceBase):
+                if not context.providedBy(obj):
+                    raise ResourceNotFound(res_id)
+            else:
+                raise NotImplementedError
+
+        request.audit_context(res_cls, res_id)
+
+        return obj
+
+    @property
+    def annotations(self):
+        if context := self.context:
+            if issubclass(context, Resource):
+                description = f"{context.cls_display_name} resource ID"
+            elif issubclass(context, IResourceBase):
+                description = f"ID of resource providing {context.__name__} interface"
+            else:
+                raise NotImplementedError
+            tdef = Annotated[ResourceID, Meta(description=description)]
+        else:
+            tdef = ResourceID
+        return {self.key: tdef}
+
+
+resource_factory = ResourceFactory()
+
+
+@Breadcrumb.register
+def resource_breadcrumb(obj, request):
+    if isinstance(obj, Resource):
+        return (
+            Breadcrumb(
+                label=obj.display_name,
+                link=request.route_url("resource.show", id=obj.id),
+                icon=f"rescls-{obj.cls}",
+            ),
+            obj.parent,
+        )
+
+
+@react_renderer("@nextgisweb/resource/page/show")
+def show(request):
+    request.resource_permission(ResourceScope.read)
+    obj = request.context
+
+    sections = list()
+    for section in resource_sections:
+        if not (ctx := section.callback(obj, request=request)):
+            continue
+        if not isinstance(ctx, dict):
+            ctx = dict()
+        sections.append({"module": section.jsentry, "props": ctx})
+
+    props = {"resourceId": obj.id, "sectionsConfig": sections}
+    return dict(
+        props=props,
+        obj=request.context,
+    )
+
+
+def root(request):
+    return HTTPFound(request.route_url("resource.show", id=0))
+
+
+@react_renderer("@nextgisweb/resource/page/search")
+def search_page(request):
+    return dict(
+        title=gettext("Resource search"),
+        hide_resource_filter=True,
+        maxwidth=True,
+        maxheight=True,
+        adaptive=True,
+    )
+
+
+@react_renderer("@nextgisweb/resource/json-view")
+def json_view(request):
+    request.resource_permission(ResourceScope.read)
+    return dict(
+        props=dict(id=request.context.id),
+        title=gettext("JSON view"),
+        obj=request.context,
+        maxheight=True,
+    )
+
+
+@react_renderer("@nextgisweb/resource/effective-permissions")
+def effective_permisssions(request):
+    request.resource_permission(ResourceScope.read)
+    return dict(
+        props=dict(resourceId=request.context.id),
+        title=gettext("User permissions"),
+        obj=request.context,
+    )
+
+
+# TODO: Move to API
+def schema(request) -> JSONType:
+    tr = request.translate
+    resources = dict()
+    scopes = dict()
+
+    for identity, cls in Resource.registry.items():
+        resources[identity] = dict(
+            identity=identity,
+            label=tr(cls.cls_display_name),
+            scopes=list(cls.scope.keys()),
+        )
+
+    for k, scp in Scope.registry.items():
+        spermissions = dict()
+        for p in scp.values():
+            spermissions[p.name] = dict(label=tr(p.label))
+
+        scopes[k] = dict(
+            identity=k,
+            permissions=spermissions,
+            label=tr(scp.label),
+        )
+
+    return dict(resources=resources, scopes=scopes)
+
+
+@dataclass
+class OnResourceCreateView:
+    cls: str
+    parent: Resource
+
+
+@react_renderer("@nextgisweb/resource/composite")
+def create(request):
+    request.resource_permission(ResourceScope.manage_children)
+    cls = request.GET.get("cls")
+    zope.event.notify(OnResourceCreateView(cls=cls, parent=request.context))
+    setup = dict(operation="create", cls=cls, parent=request.context.id)
+    return dict(
+        props=dict(setup=setup),
+        obj=request.context,
+        title=gettext("Create resource"),
+        maxheight=True,
+    )
+
+
+@react_renderer("@nextgisweb/resource/composite")
+def update(request):
+    request.resource_permission(ResourceScope.update)
+    setup = dict(operation="update", id=request.context.id)
+    return dict(
+        props=dict(setup=setup),
+        obj=request.context,
+        title=gettext("Update resource"),
+        maxheight=True,
+    )
+
+
+@react_renderer("@nextgisweb/resource/delete-page")
+def delete(request):
+    request.resource_permission(ResourceScope.read)
+    return dict(
+        # Delete page is universal for multiple resources deletion which is why resources is an array
+        props=dict(resources=[request.context.id], navigateToId=request.context.parent.id),
+        title=gettext("Delete resource"),
+        obj=request.context,
+        maxheight=True,
+    )
+
+
+@react_renderer("@nextgisweb/resource/export-settings")
+def resource_export(request):
+    request.require_administrator()
+    return dict(
+        title=gettext("Resource export"),
+    )
+
+
+# Sections
+
+resource_sections = PageSections("resource_section")
+
+
+@resource_sections("@nextgisweb/resource/resource-section/main", order=-100)
+def resource_section_main(obj, *, request, **kwargs):
+    return {"resourceId": obj.id}
+
+
+@resource_sections("@nextgisweb/resource/resource-section/children", order=-50)
+def resource_section_children(obj, *, request, **kwargs):
+    return {"resourceId": obj.id}
+
+
+@resource_sections("@nextgisweb/resource/resource-section/description", order=-60)
+def resource_section_description(obj, **kwargs):
+    return bool(obj.description)
+
+
+@resource_sections("@nextgisweb/resource/resource-section/external-access")
+def resource_section_external_access(obj, *, request, **kwargs):
+    tr = request.localizer.translate
+
+    external_docs_links = request.env.pyramid.options["nextgis_external_docs_links"]
+    links = list()
+    for link in ExternalAccessLink.registry:
+        if itm := link.factory(obj, request):
+            links.append(
+                dict(
+                    title=tr(itm.title),
+                    help=tr(itm.help) if itm.help else None,
+                    docsUrl=itm.docs_url if external_docs_links else None,
+                    url=itm.url,
+                )
+            )
+    return {"links": links} if len(links) > 0 else None
+
+
+def setup_pyramid(comp, config):
+    def resource_permission(request, permission, resource=None):
+        if isinstance(resource, Permission):
+            warnings.warn(
+                "Deprecated argument order for resource_permission. "
+                "Use request.resource_permission(permission, resource).",
+                stacklevel=2,
+            )
+
+            permission, resource = resource, permission
+
+        if resource is None:
+            resource = request.context
+
+        if not resource.has_permission(permission, request.user):
+            raise InsufficientPermissions(
+                message=gettext("Insufficient '%s' permission in scope '%s' on resource id = %d.")
+                % (permission.name, permission.scope.identity, resource.id),
+                data=dict(
+                    resource=dict(id=resource.id),
+                    permission=permission.name,
+                    scope=permission.scope.identity,
+                ),
+            )
+
+    config.add_request_method(resource_permission, "resource_permission")
+
+    def _route(route_name, route_path, **kwargs):
+        return config.add_route(
+            "resource." + route_name,
+            "/resource/" + route_path,
+            **kwargs,
+        )
+
+    def _resource_route(route_name, route_path, **kwargs):
+        return _route(
+            route_name,
+            route_path,
+            factory=resource_factory,
+            **kwargs,
+        )
+
+    _route("schema", "schema", get=schema)
+    _route("root", "", get=root)
+    _route("search.page", "search", get=search_page)
+
+    _resource_route("show", r"{id:uint}", get=show)
+    _resource_route("json", r"{id:uint}/json", get=json_view)
+    _resource_route("effective_permissions", r"{id:uint}/permissions", get=effective_permisssions)
+    _resource_route("export.page", r"{id:uint}/export", request_method="GET")
+
+    config.add_route(
+        "resource.control_panel.resource_export",
+        "/control-panel/resource-export",
+        get=resource_export,
+    )
+
+    # CRUD
+
+    _resource_route("create", r"{id:uint}/create", get=create)
+    _resource_route("update", r"{id:uint}/update", get=update)
+    _resource_route("delete", r"{id:uint}/delete", get=delete)
+
+    # Actions
+
+    if comp.options["home.enabled"]:
+        from .home import on_user_login
+
+        zope.event.classhandler.handler(OnUserLogin)(on_user_login)
+
+    from .favorite import view as favorite_view
+
+    favorite_view.setup_pyramid(comp, config)

@@ -1,0 +1,543 @@
+import json
+from typing import Annotated, Any, Literal
+
+import requests
+from msgspec import UNSET, Meta, Struct, UnsetType
+from pyproj import CRS
+from pyproj.database import query_crs_info
+from requests.exceptions import RequestException
+from sqlalchemy import sql
+
+from nextgisweb.env import DBSession, env, gettext, gettextf
+from nextgisweb.lib.apitype import AsJSON, EmptyObject, StatusCode
+from nextgisweb.lib.geometry import Geometry, Transformer, geom_area, geom_length
+
+from nextgisweb.core.exception import ExternalServiceError, ValidationError
+from nextgisweb.jsrealm import TSExport
+
+from .component import CatalogSource
+from .model import SRS, WKT_EPSG_4326, SRSRef
+from .pyramid import SRSID, srs_factory
+from .util import SRSFormat, convert_to_wkt
+
+
+class CatalogEntry(Struct, kw_only=True):
+    display_name: str
+    wkt: str
+    auth_name: str
+    auth_srid: int
+    catalog_id: int | None = None
+
+
+def proj_catalog_search(q: str, limit: int = 100) -> list:
+    q = q.lower()
+    return [
+        r
+        for r in query_crs_info(auth_name="EPSG", allow_deprecated=False)
+        if q in r.name.lower() or q in r.code.lower() or q in f"{r.auth_name}:{r.code}".lower()
+    ][:limit]
+
+
+def proj_catalog_item(epsg_code: int) -> CatalogEntry:
+    crs = CRS.from_authority("EPSG", epsg_code)
+    return CatalogEntry(
+        display_name=crs.name, wkt=crs.to_wkt(), auth_name="EPSG", auth_srid=epsg_code
+    )
+
+
+DisplayName = Annotated[str, Meta(min_length=1, description="Display name", examples=["WGS 84"])]
+SRSWKT = Annotated[str, Meta(description="OGC WKT definition", examples=[WKT_EPSG_4326])]
+SRSSystem = Annotated[bool, Meta(description="System default SRS flag")]
+SRSProtected = Annotated[bool, Meta(description="OGC WKT protection (read-only) flag")]
+SRSGeographic = Annotated[bool, Meta(description="Geographic SRS flag")]
+CatalogID = Annotated[int, Meta(ge=1)]
+
+AuthNameMeta = Meta(description="Authority name", examples=["EPSG"])
+AuthSRIDMeta = Meta(description="Authority identifier", examples=[4326])
+CatalogIDMeta = Meta(description="ID of SRS in catalog")
+
+GeomWKT = Annotated[
+    str,
+    Meta(
+        description="Geometry in WKT format",
+        examples=["LINESTRING(30 10, 10 30, 40 40)"],
+    ),
+]
+GeomGeoJSON = Annotated[
+    dict[str, Any],
+    Meta(
+        description="Geometry in GeoJSON format",
+        examples=[{"type": "LineString", "coordinates": [[30, 10], [10, 30], [40, 40]]}],
+    ),
+]
+
+
+class SRSCreate(Struct, kw_only=True):
+    display_name: DisplayName
+    wkt: SRSWKT
+
+
+class SRSRead(Struct, kw_only=True):
+    id: SRSID
+    display_name: DisplayName
+    auth_name: Annotated[str | None, AuthNameMeta]
+    auth_srid: Annotated[int | None, AuthSRIDMeta]
+    wkt: SRSWKT
+    catalog_id: Annotated[CatalogID | None, CatalogIDMeta]
+    system: SRSSystem
+    protected: SRSProtected
+    geographic: SRSGeographic
+
+
+class SRSUpdate(Struct, kw_only=True):
+    display_name: DisplayName | UnsetType = UNSET
+    wkt: SRSWKT | UnsetType = UNSET
+
+
+def serialize(obj: SRS) -> SRSRead:
+    return SRSRead(
+        id=obj.id,
+        display_name=obj.display_name,
+        auth_name=obj.auth_name,
+        auth_srid=obj.auth_srid,
+        wkt=obj.wkt,
+        catalog_id=obj.catalog_id,
+        system=obj.system,
+        protected=obj.protected,
+        geographic=obj.is_geographic,
+    )
+
+
+def deserialize(obj, data: SRSCreate, *, create: bool):
+    if (display_name := data.display_name) is not UNSET:
+        with DBSession.no_autoflush:
+            existing = SRS.filter_by(display_name=display_name).filter(SRS.id != obj.id).first()
+            if existing:
+                raise ValidationError(("SRS display name is not unique."))
+        obj.display_name = display_name
+
+    if (wkt := data.wkt) is not UNSET and wkt != obj.wkt:
+        if not create and obj.protected:
+            raise ValidationError(("OGC WKT definition cannot be changed for this SRS."))
+        obj.wkt = wkt
+
+
+def cget(request) -> AsJSON[list[SRSRead]]:
+    """Read spatial reference systems
+
+    :returns: List of spatial reference systems"""
+    return [serialize(obj) for obj in SRS.query()]
+
+
+def cpost(request, *, body: SRSCreate) -> Annotated[SRSRef, StatusCode(201)]:
+    """Create spatial reference system
+
+    :returns: Created spatial reference system"""
+    request.user.require_permission(SRS.permissions.manage)
+
+    obj = SRS().persist()
+    deserialize(obj, body, create=True)
+
+    DBSession.flush()
+    request.response.status_code = 201
+    return SRSRef(id=obj.id)
+
+
+def iget(srs, request) -> SRSRead:
+    """Read spatial reference system
+
+    :returns: Spatial reference system details"""
+    return serialize(srs)
+
+
+def iput(srs, request, *, body: SRSUpdate) -> SRSRef:
+    """Update spatial reference system
+
+    :returns: Updated spatial reference system"""
+    request.user.require_permission(SRS.permissions.manage)
+
+    deserialize(srs, body, create=False)
+    return SRSRef(id=srs.id)
+
+
+def idelete(srs, request) -> EmptyObject:
+    """Delete spatial reference system
+
+    :returns: Spatial reference system deleted successfully"""
+    request.user.require_permission(SRS.permissions.manage)
+
+    if srs.system:
+        raise ValidationError(gettext("System SRS cannot be deleted."))
+
+    DBSession.delete(srs)
+    return None
+
+
+class ConvertBody(Struct, kw_only=True):
+    format: Annotated[SRSFormat, TSExport("SRSFormat"), Meta(description="Format")]
+    projStr: Annotated[str, Meta(description="SRS definition to covert", examples=["4326"])]
+
+
+class ConvertResponse(Struct, kw_only=True):
+    wkt: SRSWKT
+
+
+def convert(request, *, body: ConvertBody) -> ConvertResponse:
+    """Convert SRS definition into OGC WKT format
+
+    :returns: SRS definition in OGC WKT format"""
+    wkt = convert_to_wkt(body.projStr, body.format, pretty=True)
+    if not wkt:
+        raise ValidationError(gettext("Invalid SRS definition!"))
+
+    return ConvertResponse(wkt=wkt)
+
+
+class GeomTransformBody(Struct, kw_only=True):
+    srs: SRSID
+    geom: GeomWKT
+
+
+class GeomTransformResponse(Struct, kw_only=True):
+    geom: SRSWKT
+
+
+def geom_transform(srs_to, request, *, body: GeomTransformBody) -> GeomTransformResponse:
+    """Transform geometry from one SRS to another
+
+    :returns: Geometry reprojected into the target SRS"""
+    srs_from = SRS.filter_by(id=body.srs).one()
+    geom = Geometry.from_wkt(body.geom)
+
+    transformer = Transformer(srs_from.wkt, srs_to.wkt)
+    geom = transformer.transform(geom)
+
+    return GeomTransformResponse(geom=geom.wkt)
+
+
+class GeomTransformBatchBody(Struct, kw_only=True):
+    srs_from: Annotated[SRSID, Meta(description="Source SRS to reproject from")]
+    srs_to: Annotated[list[SRSID], Meta(description="Target SRSs to reproject to")]
+    geom: Annotated[GeomWKT, Meta(description="Geometry")]
+
+
+class GeomTransformBatchResponse(Struct, kw_only=True):
+    srs_id: SRSWKT
+    geom: Annotated[GeomWKT | None, Meta(description="Transformed geometry")]
+
+
+def geom_transform_batch(
+    request,
+    *,
+    body: GeomTransformBatchBody,
+) -> AsJSON[list[GeomTransformBatchResponse]]:
+    """Reproject geometry to multiple SRS
+
+    :returns: Geometry reprojected to the requested SRS"""
+    srs_from = SRS.filter_by(id=body.srs_from).one()
+    srs_to = SRS.filter(SRS.id.in_([int(s) for s in body.srs_to]))
+
+    result = []
+    for srs in srs_to:
+        try:
+            transformer = Transformer(srs_from.wkt, srs.wkt)
+            geom = Geometry.from_wkt(body.geom)
+            geom_srs_to = transformer.transform(geom)
+            result.append(GeomTransformBatchResponse(srs_id=srs.id, geom=geom_srs_to.wkt))
+        except ValueError:
+            result.append(GeomTransformBatchResponse(srs_id=srs.id, geom=None))
+
+    return result
+
+
+class GeometryPropertyResponse(Struct):
+    value: float
+
+
+GeometryPropertyGeomFormat = Annotated[
+    Literal["geojson", "wkt"],
+    Meta(description="Format of the geometry data", examples=["geojson", "wkt"]),
+    TSExport("GeometryPropertyGeomFormat"),
+]
+
+
+class GeometryPropertyBody(Struct, kw_only=True):
+    srs: SRSID | UnsetType = UNSET
+    geom_format: GeometryPropertyGeomFormat | UnsetType = UNSET
+    geom: GeomWKT | GeomGeoJSON
+
+
+def geom_calc(srs_to: SRS, data: GeometryPropertyBody, measure_fun):
+    if (srs_from_id := data.srs) is UNSET:
+        srs_from_id = srs_to.id
+
+    geom = (
+        Geometry.from_geojson(data.geom)
+        if data.geom_format == "geojson"
+        else Geometry.from_wkt(data.geom)
+    )
+
+    if srs_from_id != srs_to.id:
+        srs_from = SRS.filter_by(id=srs_from_id).one()
+        transformer = Transformer(srs_from.wkt, srs_to.wkt)
+        geom = transformer.transform(geom)
+
+    value = measure_fun(geom, srs_to.wkt)
+    return GeometryPropertyResponse(value=value)
+
+
+SRSIDCalculation = Annotated[SRSID, Meta(description="ID of SRS to make calculations on")]
+
+
+def geom_length_post(
+    srs,
+    request,
+    *,
+    body: GeometryPropertyBody,
+) -> GeometryPropertyResponse:
+    """Calculate geometry length on SRS
+
+    :returns: Calculated length value in the SRS units"""
+    return geom_calc(srs, body, geom_length)
+
+
+def geom_area_post(
+    srs,
+    request,
+    *,
+    body: GeometryPropertyBody,
+) -> GeometryPropertyResponse:
+    """Calculate geometry area on SRS
+
+    :returns: Calculated area value in the SRS units"""
+    return geom_calc(srs, body, geom_area)
+
+
+class SRSCatalogRecord(Struct, kw_only=True):
+    id: SRSID
+    display_name: DisplayName
+    auth_name: Annotated[str, AuthNameMeta]
+    auth_srid: Annotated[int, AuthSRIDMeta]
+
+
+class SRSCatalogItem(Struct, kw_only=True):
+    display_name: DisplayName
+    wkt: SRSWKT
+
+
+QueryStr = Annotated[
+    str | None,
+    Meta(description="Query for name or code based search", examples=["UTM Zone 42N", "4326"]),
+]
+
+QueryLat = Annotated[float | None, Meta(description="Latitude", examples=[27.9881])]
+QueryLon = Annotated[float | None, Meta(description="Longitude", examples=[86.9250])]
+
+
+def catalog_collection(
+    request,
+    *,
+    q: QueryStr = None,
+    lat: QueryLat = None,
+    lon: QueryLon = None,
+) -> AsJSON[list[SRSCatalogRecord]]:
+    """Search SRS in catalog
+
+    :returns: List of matching spatial reference systems from the catalog"""
+    request.require_administrator()
+
+    if env.spatial_ref_sys.catalog_source == CatalogSource.PROJ:
+        return [
+            SRSCatalogRecord(
+                id=int(r.code),
+                display_name=r.name,
+                auth_name=r.auth_name,
+                auth_srid=int(r.code),
+            )
+            for r in proj_catalog_search(q or "")
+        ]
+
+    query = dict()
+
+    if q is not None:
+        query["q"] = q
+
+    if request.env.spatial_ref_sys.options["catalog.coordinates_search"]:
+        if lat is not None and lon is not None:
+            query["intersects"] = json.dumps(
+                dict(type="Point", coordinates=(lon, lat)),
+            )
+
+    catalog_url = env.spatial_ref_sys.options["catalog.url"]
+    url = catalog_url + "/api/v1/spatial_ref_sys/"
+    timeout = env.spatial_ref_sys.options["catalog.timeout"].total_seconds()
+    try:
+        res = requests.get(url, query, timeout=timeout)
+        res.raise_for_status()
+    except RequestException:
+        raise ExternalServiceError()
+
+    return [
+        SRSCatalogRecord(
+            id=srs["id"],
+            display_name=srs["display_name"],
+            auth_name=srs["auth_name"],
+            auth_srid=srs["auth_srid"],
+        )
+        for srs in res.json()
+    ]
+
+
+def catalog_item(request, id: Annotated[CatalogID, CatalogIDMeta]) -> SRSCatalogItem:
+    """Read SRS from catalog
+
+    :returns: Spatial reference system details from the catalog"""
+    request.require_administrator()
+
+    entry = (
+        proj_catalog_item(id)
+        if env.spatial_ref_sys.catalog_source == CatalogSource.PROJ
+        else remote_catalog_item(id)
+    )
+    return SRSCatalogItem(display_name=entry.display_name, wkt=entry.wkt)
+
+
+class SRSCatalogImportBody(Struct, kw_only=True):
+    catalog_id: Annotated[CatalogID, CatalogIDMeta]
+
+
+class SRSCatalogImportResponse(Struct, kw_only=True):
+    id: Annotated[int, Meta(description="Identifier for newly imported SRS", examples=[3395])]
+
+
+def catalog_import(request, *, body: SRSCatalogImportBody) -> SRSCatalogImportResponse:
+    """Import SRS from catalog
+
+    :returns: Imported spatial reference system"""
+    request.require_administrator()
+
+    entry = (
+        proj_catalog_item(int(body.catalog_id))
+        if env.spatial_ref_sys.catalog_source == CatalogSource.PROJ
+        else remote_catalog_item(int(body.catalog_id))
+    )
+
+    if entry.auth_name is None or entry.auth_srid is None:
+        msg = gettext("SRS authority attributes must be defined while importing from the catalog.")
+        raise ValidationError(msg)
+
+    obj = SRS(
+        display_name=entry.display_name,
+        wkt=entry.wkt,
+        auth_name=entry.auth_name,
+        auth_srid=entry.auth_srid,
+        catalog_id=entry.catalog_id,
+    )
+
+    conflict_filter = [
+        sql.and_(SRS.auth_name == entry.auth_name, SRS.auth_srid == entry.auth_srid),
+    ]
+    if entry.catalog_id is not None:
+        conflict_filter.append(SRS.catalog_id == entry.catalog_id)
+    if entry.auth_srid is not None:
+        obj.id = entry.auth_srid
+        conflict_filter.append(SRS.id == entry.auth_srid)
+
+    conflict = SRS.filter(sql.or_(*conflict_filter)).first()
+    if conflict:
+        raise ValidationError(gettextf("SRS #{} already exists.")(conflict.id))
+
+    obj.persist()
+    DBSession.flush()
+
+    return SRSCatalogImportResponse(id=obj.id)
+
+
+def remote_catalog_item(catalog_id: int) -> CatalogEntry:
+    catalog_url = env.spatial_ref_sys.options["catalog.url"]
+    url = catalog_url + "/api/v1/spatial_ref_sys/" + str(catalog_id)
+    timeout = env.spatial_ref_sys.options["catalog.timeout"].total_seconds()
+    try:
+        res = requests.get(url, timeout=timeout)
+        res.raise_for_status()
+    except RequestException:
+        raise ExternalServiceError()
+
+    srs = res.json()
+    return CatalogEntry(
+        display_name=srs["display_name"],
+        wkt=srs["wkt"],
+        auth_name=srs["auth_name"],
+        auth_srid=srs["auth_srid"],
+        catalog_id=srs["id"],
+    )
+
+
+def setup_pyramid(comp, config):
+    config.add_route(
+        "spatial_ref_sys.collection",
+        "/api/component/spatial_ref_sys/",
+        get=cget,
+        post=cpost,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.convert",
+        "/api/component/spatial_ref_sys/convert",
+        post=convert,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.geom_transform.batch",
+        "/api/component/spatial_ref_sys/geom_transform",
+        post=geom_transform_batch,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.geom_transform",
+        "/api/component/spatial_ref_sys/{id}/geom_transform",
+        factory=srs_factory,
+        post=geom_transform,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.geom_length",
+        "/api/component/spatial_ref_sys/{id}/geom_length",
+        factory=srs_factory,
+        post=geom_length_post,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.geom_area",
+        "/api/component/spatial_ref_sys/{id}/geom_area",
+        factory=srs_factory,
+        post=geom_area_post,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.item",
+        "/api/component/spatial_ref_sys/{id}",
+        factory=srs_factory,
+        get=iget,
+        put=iput,
+        delete=idelete,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.catalog.collection",
+        "/api/component/spatial_ref_sys/catalog/",
+        get=catalog_collection,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.catalog.item",
+        "/api/component/spatial_ref_sys/catalog/{id}",
+        types=dict(id=int),
+        get=catalog_item,
+    )
+
+    config.add_route(
+        "spatial_ref_sys.catalog.import",
+        "/api/component/spatial_ref_sys/catalog/import",
+        post=catalog_import,
+    )

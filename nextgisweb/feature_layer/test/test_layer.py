@@ -1,0 +1,335 @@
+import json
+from datetime import date, datetime, time
+
+import pytest
+from msgspec import UNSET
+from osgeo import ogr
+
+from nextgisweb.lib.geometry import Geometry, Transformer
+
+from nextgisweb.postgis.test import create_feature_layer as create_postgis_layer
+from nextgisweb.spatial_ref_sys import SRS, WKT_EPSG_4326
+from nextgisweb.vector_layer.test import create_feature_layer as create_vector_layer
+from nextgisweb.wfsclient import WFSLayer
+from nextgisweb.wfsclient.test import create_feature_layer as create_wfs_layer
+
+from ..interface import (
+    IFeatureQueryFilter,
+    IFeatureQueryFilterBy,
+    IFeatureQueryOrderBy,
+)
+from .data import generate_filter_extents
+
+pytestmark = pytest.mark.usefixtures("ngw_auth_administrator")
+
+filter_cases = (
+    ((("null", "isnull", "yes"),), [1, 2]),
+    ((("null", "isnull", "no"),), [3]),
+    ((("string", "eq", "Foo bar"),), [1, 3]),
+    ((("string", "ne", "Foo bar"),), [2]),
+    ((("int", "eq", 0),), [2]),
+    ((("int", "eq", 0), ("unicode", "eq", "Юникод")), [2]),
+    ((("int64", "ge", 500),), [1, 2]),
+    ((("int64", "gt", 500),), [1]),
+    ((("int64", "le", 500),), [2, 3]),
+    ((("int64", "lt", 500),), [3]),
+)
+order_by_cases = (
+    ((("asc", "real"),), [1, 3, 2]),
+    ((("asc", "date"), ("desc", "int")), [2, 1, 3]),
+)
+
+
+def cmp_fields(gj_fields, fields):
+    assert gj_fields.keys() == fields.keys()
+
+    for k, v in fields.items():
+        gjv = gj_fields[k]
+        t = type(v)
+        if v is None:
+            assert gjv is None
+        elif t in (str, int):
+            assert gjv == v
+        elif t is float:
+            assert pytest.approx(gjv) == v
+        elif t is date:
+            assert date.fromisoformat(gjv) == v
+        elif t is time:
+            assert time.fromisoformat(gjv) == v
+        elif t is datetime:
+            assert datetime.fromisoformat(gjv) == v
+        else:
+            raise NotImplementedError("Can't compare {} type.".format(t))
+
+
+def cmp_geom(gj_geom, geom2, srs):
+    geom1 = Geometry.from_geojson(gj_geom)
+    if srs.id != 4326:
+        t = Transformer(WKT_EPSG_4326, srs.wkt)
+        geom1 = t.transform(geom1)
+    g1 = geom1.shape
+    g2 = geom2.shape
+    assert g1.equals_exact(g2, 5e-07)
+
+
+@pytest.mark.parametrize(
+    "create_resource",
+    (
+        pytest.param(create_vector_layer, id="vector_layer"),
+        pytest.param(create_wfs_layer, id="wfsclient_layer"),
+        pytest.param(create_postgis_layer, id="postgis_layer"),
+    ),
+)
+def test_attributes(
+    create_resource,
+    ngw_resource_group_sub,
+    ngw_httptest_app,
+    ngw_data_path,
+):
+    geojson = json.loads((ngw_data_path / "points.geojson").read_text())
+    gj_fs = geojson["features"]
+
+    ds = ogr.Open(str(ngw_data_path / "points.geojson"))
+    ogrlayer = ds.GetLayer(0)
+
+    with create_resource(
+        ogrlayer, ngw_resource_group_sub, ngw_httptest_app=ngw_httptest_app
+    ) as layer:
+        layer.persist()
+
+        # IFeatureQuery
+
+        query = layer.feature_query()
+        result = query()
+        assert result.total_count == len(gj_fs)
+        for i, f in enumerate(result):
+            cmp_fields(gj_fs[i]["properties"], f.fields)
+            # TODO: Migrate everything to UNSET
+            assert f.geom in (None, UNSET)
+
+        # - fields
+        fields = ("int", "string")
+        query = layer.feature_query()
+        query.fields(*fields)
+        for i, f in enumerate(query()):
+            gjfields = {k: gj_fs[i]["properties"][k] for k in fields}
+            cmp_fields(gjfields, f.fields)
+
+        # - limit
+        limit = 1
+        query = layer.feature_query()
+        query.limit(limit)
+        fs = list(query())
+        assert len(fs) == limit
+        cmp_fields(gj_fs[limit - 1]["properties"], fs[limit - 1].fields)
+
+        offset = 1
+        query = layer.feature_query()
+        query.limit(limit, offset)
+        fs = list(query())
+        assert len(fs) == limit
+        cmp_fields(gj_fs[offset + limit - 1]["properties"], fs[limit - 1].fields)
+
+        q = layer.feature_query()
+
+        if IFeatureQueryFilter.providedBy(q):
+            for filter_, ids_expected in filter_cases:
+                # Skip unsupported operations
+                skip = False
+                if isinstance(layer, WFSLayer):
+                    for k, op, v in filter_:
+                        if op == "isnull" and v == "no":
+                            skip = True
+                            break
+                if skip:
+                    continue
+
+                query = layer.feature_query()
+                query.filter(*filter_)
+                ids = [f.id for f in query()]
+                assert sorted(ids) == ids_expected
+
+        if IFeatureQueryFilterBy.providedBy(q):
+            for filter_, ids_expected in filter_cases:
+                filter_by = dict()
+                skip = False
+                for k, o, v in filter_:
+                    if o != "eq":
+                        skip = True
+                        break
+                    filter_by[k] = v
+                if skip:
+                    continue
+                query = layer.feature_query()
+                query.filter_by(**filter_by)
+                ids = [f.id for f in query()]
+                assert sorted(ids) == ids_expected
+
+        if IFeatureQueryOrderBy.providedBy(q):
+            for order_by, ids_expected in order_by_cases:
+                query = layer.feature_query()
+                query.order_by(*order_by)
+                ids = [f.id for f in query()]
+                assert ids == ids_expected
+
+
+def geom_type_product():
+    for cfunc, alias in (
+        (create_vector_layer, "vector_layer"),
+        (create_postgis_layer, "postgis_layer"),
+        (create_wfs_layer, "wfsclient_layer"),
+    ):
+        for geom_type in (
+            "point",
+            "pointz",
+            "multipoint",
+            "multipointz",
+            "linestring",
+            "linestringz",
+            "multilinestring",
+            "multilinestringz",
+            "polygon",
+            "polygonz",
+            "multipolygon",
+            "multipolygonz",
+        ):
+            yield pytest.param(cfunc, geom_type, id=f"{alias}-{geom_type}")
+
+
+@pytest.mark.parametrize("create_resource, geom_type", geom_type_product())
+def test_geometry(
+    create_resource,
+    geom_type,
+    ngw_resource_group_sub,
+    ngw_httptest_app,
+    ngw_data_path,
+):
+    data = ngw_data_path / "geometry" / f"{geom_type}.geojson"
+
+    geojson = json.loads(data.read_text())
+    gj_fs = geojson["features"]
+
+    ds = ogr.Open(str(data))
+    ogrlayer = ds.GetLayer(0)
+
+    with create_resource(
+        ogrlayer, ngw_resource_group_sub, ngw_httptest_app=ngw_httptest_app
+    ) as layer:
+        layer.persist()
+
+        # IFeatureQuery
+
+        # - geom
+        query = layer.feature_query()
+        query.geom()
+        result = query()
+        assert result.total_count == len(gj_fs)
+        for i, f in enumerate(result):
+            cmp_geom(gj_fs[i]["geometry"], f.geom, layer.srs)
+
+        # # - srs
+        srs4326 = SRS.filter_by(id=4326).one()
+        query = layer.feature_query()
+        query.geom()
+        query.srs(srs4326)
+        result = query()
+        assert result.total_count == len(gj_fs)
+        for i, f in enumerate(result):
+            cmp_geom(gj_fs[i]["geometry"], f.geom, srs4326)
+
+        # - box
+        query = layer.feature_query()
+        query.box()
+        query.srs(srs4326)
+        result = query()
+        assert result.total_count == len(gj_fs)
+        for i, f in enumerate(result):
+            gj_geom = gj_fs[i]["geometry"]
+            b1 = Geometry.from_geojson(gj_geom).bounds
+            b2 = f.box.bounds
+            for c1, c2 in zip(b1, b2):
+                assert pytest.approx(c1) == c2
+
+
+filter_extents_data = generate_filter_extents()
+
+
+@pytest.mark.parametrize(
+    "create_resource",
+    (
+        pytest.param(create_vector_layer, id="vector_layer"),
+        pytest.param(create_postgis_layer, id="postgis_layer"),
+    ),
+)
+@pytest.mark.parametrize("filter_, expected_extent", filter_extents_data)
+def test_filtered_extent(
+    create_resource,
+    filter_,
+    expected_extent,
+    ngw_resource_group_sub,
+    ngw_httptest_app,
+    ngw_data_path,
+):
+    data = ngw_data_path / "filter-extent-layer.geojson"
+
+    ds = ogr.Open(str(data))
+    ogrlayer = ds.GetLayer(0)
+
+    with create_resource(
+        ogrlayer, ngw_resource_group_sub, ngw_httptest_app=ngw_httptest_app
+    ) as layer:
+        layer.persist()
+
+        # Filtered extent
+        query = layer.feature_query()
+        if filter_ is not None:
+            query.filter(filter_)
+        actual_extent = query().extent
+
+        for k in ("minLat", "maxLat", "minLon", "maxLon"):
+            if expected_extent[k] is None:
+                assert actual_extent[k] is None
+            else:
+                assert abs(expected_extent[k] - actual_extent[k]) < 1e-6
+
+
+@pytest.mark.parametrize(
+    "create_resource",
+    (
+        pytest.param(create_vector_layer, id="vector_layer"),
+        pytest.param(create_postgis_layer, id="postgis_layer"),
+    ),
+)
+def test_edit(
+    create_resource,
+    ngw_resource_group_sub,
+    ngw_httptest_app,
+    ngw_data_path,
+):
+    ds = ogr.Open(str(ngw_data_path / "points.geojson"))
+    ogrlayer = ds.GetLayer(0)
+
+    with create_resource(
+        ogrlayer, ngw_resource_group_sub, ngw_httptest_app=ngw_httptest_app
+    ) as layer:
+        layer.persist()
+
+        fid = 2
+        feature = None
+        for f in layer.feature_query()():
+            if f.id != fid:
+                assert f.fields["string"] == "Foo bar"
+            else:
+                assert feature is None
+                assert f.fields["string"] == "Boo far"
+                feature = f
+        assert feature is not None, f"Feature #{fid} not found"
+
+        expected = feature.fields["string"] = "test-edit"
+        layer.feature_put(feature)
+
+        for f in layer.feature_query()():
+            if f.id != fid:
+                assert f.fields["string"] == "Foo bar"
+            else:
+                assert f.fields["string"] == expected

@@ -1,0 +1,74 @@
+import { observer } from "mobx-react-lite";
+import { fromLonLat } from "ol/proj";
+import { useCallback } from "react";
+import type { ReactNode } from "react";
+
+import { useThemeVariables } from "@nextgisweb/gui/hook";
+import { MapComponent } from "@nextgisweb/webmap/map-component";
+
+import type { Display } from "../../Display";
+
+import { MapControls } from "./MapControls";
+import { MapHighlight } from "./MapHighlight";
+import { PanelMapComponents } from "./PanelMapComponents";
+import { PluginMapComponents } from "./PluginMapComponents";
+import { WebmapLayers } from "./WebmapLayers";
+
+import "./MapPane.less";
+
+export const MapPane = observer(
+  ({ display, children }: { display: Display; children?: ReactNode }) => {
+    const themeVariables = useThemeVariables({
+      "theme-color-primary": "colorPrimary",
+    });
+
+    const whenCreated = useCallback(() => {
+      const ready = display.mapReady;
+      display.setMapReady(true);
+
+      const urlParams = display.urlParams;
+
+      if (!ready) {
+        if (
+          !("zoom" in urlParams && "lon" in urlParams && "lat" in urlParams)
+        ) {
+          display.map.zoomToInitialExtent();
+        } else {
+          const view = display.map.olView;
+          if (urlParams.lon && urlParams.lat) {
+            view.setCenter(fromLonLat([urlParams.lon, urlParams.lat]));
+          }
+          if (urlParams.zoom !== undefined) {
+            view.setZoom(urlParams.zoom);
+          }
+
+          if ("angle" in urlParams && urlParams.angle !== undefined) {
+            view.setRotation(urlParams.angle);
+          }
+        }
+      }
+    }, [display]);
+
+    return (
+      <MapComponent
+        className="ngw-webmap-display-map-pane"
+        mapStore={display.map}
+        style={themeVariables}
+        whenCreated={whenCreated}
+      >
+        <MapControls mapStore={display.map} isTinyMode={display.isTinyMode} />
+        <MapHighlight
+          mapStore={display.map}
+          highlightStore={display.highlighter}
+        />
+        <WebmapLayers treeStore={display.treeStore} />
+        <PanelMapComponents display={display} />
+        <PluginMapComponents display={display} />
+
+        {children}
+      </MapComponent>
+    );
+  }
+);
+
+MapPane.displayName = "MapPane";

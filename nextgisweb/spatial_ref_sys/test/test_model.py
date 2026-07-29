@@ -1,0 +1,160 @@
+import pytest
+import sqlalchemy as sa
+
+from nextgisweb.env import DBSession
+from nextgisweb.lib.osrhelper import sr_from_epsg, sr_from_wkt
+
+from nextgisweb.core.exception import ValidationError
+
+from ..model import (
+    BOUNDS_EPSG_3857,
+    BOUNDS_EPSG_4326,
+    SRID_LOCAL,
+    SRS,
+    WKT_EPSG_3857,
+    WKT_EPSG_4326,
+)
+
+WKT_EPSG_3395 = 'PROJCS["WGS 84 / World Mercator",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Mercator_1SP"],PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","3395"]]'
+
+
+def get_postgis_wkt(srid):
+    qpg = sa.text("SELECT srtext FROM spatial_ref_sys WHERE srid = :id")
+    return DBSession.connection().execute(qpg, dict(id=srid)).scalar()
+
+
+def test_postgis_sync(ngw_txn):
+    obj = SRS(wkt=WKT_EPSG_4326, display_name="")
+    obj.persist()
+    DBSession.flush()
+
+    assert obj.id >= SRID_LOCAL
+
+    srtext = get_postgis_wkt(obj.id)
+    assert obj.wkt == srtext
+
+    obj.wkt = WKT_EPSG_3857
+    DBSession.flush()
+
+    srtext = get_postgis_wkt(obj.id)
+    assert obj.wkt == srtext
+
+    DBSession.delete(obj)
+    DBSession.flush()
+
+    assert get_postgis_wkt(obj.id) is None
+
+
+def test_wkt_long(ngw_txn):
+    wkt_long = (" " * 2048) + WKT_EPSG_3857
+    sr = sr_from_wkt(wkt_long)
+
+    srs = SRS(wkt=wkt_long, display_name="Test long WKT")
+    srs.persist()
+    DBSession.flush()
+
+    sr_long = sr_from_wkt(srs.wkt)
+    assert sr.IsSame(sr_long)
+
+    sr_short = sr_from_wkt(srs.wkt_short)
+    assert sr.IsSame(sr_short)
+
+    wkt_postgis = get_postgis_wkt(srs.id)
+    sr_postgis = sr_from_wkt(wkt_postgis)
+    assert sr.IsSame(sr_postgis)
+
+
+@pytest.mark.parametrize(
+    "x, y, src, dst",
+    (
+        (0, 0, 4326, 3857),
+        (20037508.34, 20037508.34, 3857, 4326),
+    ),
+)
+def test_postgis_transform(ngw_txn, x, y, src, dst):
+    px, py = (
+        DBSession.connection()
+        .execute(
+            sa.text(
+                "SELECT ST_X(pt), ST_Y(pt) "
+                "FROM ST_Transform(ST_Transform("
+                "   ST_SetSRID(ST_MakePoint(:x, :y), :src) ,:dst), :src) AS pt"
+            ),
+            dict(x=x, y=y, src=src, dst=dst),
+        )
+        .fetchone()
+    )
+    assert abs(px - x) < 1e-6
+    assert abs(py - y) < 1e-6
+
+
+def test_wkt_valid():
+    SRS(wkt=WKT_EPSG_4326)
+
+
+def test_wkt_invalid():
+    with pytest.raises(ValidationError):
+        SRS(wkt="INVALID")
+
+
+@pytest.mark.parametrize(
+    "srs_id, tile, expected",
+    (
+        # West and east hemispheres
+        (4326, (0, 0, 0), (-180, -90, 0, 90)),
+        (4326, (0, 1, 0), (0, -90, 180, 90)),
+        # Check that Y-axis is top to bottom
+        (4326, (1, 0, 0), (-180, 0, -90, 90)),
+        (4326, (1, 3, 1), (90, -90, 180, 0)),
+        # Root tile in EPSG:3857
+        (3857, (0, 0, 0), BOUNDS_EPSG_3857),
+        # Example from mercantile docs rounded to 2 decimal places
+        (3857, (10, 486, 332), (-1017529.72, 7005300.77, -978393.96, 7044436.53)),
+    ),
+)
+def test_tile_extent(ngw_txn, srs_id, tile, expected):
+    srs = SRS.filter_by(id=srs_id).one()
+    extent = tuple([round(c, 2) for c in srs.tile_extent(tile)])
+    assert extent == expected
+
+
+@pytest.mark.parametrize(
+    "srs_id, extent, z, expected",
+    (
+        (4326, BOUNDS_EPSG_4326, 0, [0, 0, 1, 0]),
+        (3857, BOUNDS_EPSG_3857, 0, [0, 0, 0, 0]),
+        (4326, (0, 0, 180, 0), 0, [1, 0, 1, 0]),
+        (4326, (-180, -90, 0, 90), 0, [0, 0, 0, 0]),
+        (3857, (-1017529.72, 7005300.77, -978393.96, 7044436.53), 10, [486, 332, 486, 332]),
+    ),
+)
+def test_extent_tile_range(ngw_txn, srs_id, extent, z, expected):
+    srs = SRS.filter_by(id=srs_id).one()
+    tile_range = srs.extent_tile_range(tuple(map(float, extent)), z)
+    assert tile_range == expected
+
+
+def test_point_tilexy(ngw_txn):
+    zoom = 12
+    vdk_x, vdk_y = 14681475, 5329463
+    srs_3857 = SRS.filter_by(id=3857).one()
+    assert list(map(int, srs_3857._point_tilexy(vdk_x, vdk_y, zoom))) == [3548, 1503]
+
+    srs_3395 = SRS(
+        wkt=WKT_EPSG_3395,
+        minx=-20037508.342789244,
+        miny=-20037508.342789244,
+        maxx=20037508.342789244,
+        maxy=20037508.342789244,
+    )
+
+    vdk_x, vdk_y = 14681475, 5300249
+    assert list(map(int, srs_3395._point_tilexy(vdk_x, vdk_y, zoom))) == [3548, 1506]
+
+
+@pytest.mark.parametrize("EPSG", (3857, 4326))
+def test_osr(EPSG, ngw_txn):
+    sr1 = SRS.filter_by(auth_name="EPSG", auth_srid=EPSG).one().to_osr()
+
+    sr2 = sr_from_epsg(EPSG)
+    assert sr1.IsSame(sr2)
