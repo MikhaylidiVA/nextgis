@@ -1,0 +1,45 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+# Установка зависимостей
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    curl \
+    gnupg \
+    lsb-release \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    libxml2-dev \
+    libxslt1-dev \
+    libgeos-dev \
+    libgdal-dev \
+    libpq-dev \
+    locales \
+    wget \
+    supervisor \
+    nginx \
+    && rm -rf /var/lib/apt/lists/*
+
+# Добавление репозитория NextGIS
+RUN curl -fsSL https://repo.nextgis.com/pub/nextgis-stable/linux/ubuntu/gpg.key | gpg --dearmor -o /usr/share/keyrings/nextgis-archive-keyring.gpg
+RUN echo "deb [signed-by=/usr/share/keyrings/nextgis-archive-keyring.gpg] https://repo.nextgis.com/pub/nextgis-stable/linux/ubuntu/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/nextgis.list
+
+RUN apt-get update && apt-get install -y \
+    nextgisweb \
+    nextgisweb-libpq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Настройка конфигурации
+RUN mkdir -p /etc/nextgisweb
+COPY nextgisweb.cfg.template /etc/nextgisweb/nextgisweb.cfg
+
+# Скрипт запуска
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8080
+
+ENTRYPOINT ["/entrypoint.sh"]
