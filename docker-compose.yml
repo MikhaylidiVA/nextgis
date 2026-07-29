@@ -8,10 +8,9 @@ services:
     environment:
       POSTGRES_DB: nextgisweb
       POSTGRES_USER: nextgis
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_strong_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-StrongPassword123!}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - pg_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nextgis -d nextgisweb"]
       interval: 10s
@@ -28,28 +27,18 @@ services:
       db:
         condition: service_healthy
     environment:
-      # Основные настройки NextGIS
-      NGW_CONFIG_FILE: /etc/nextgisweb/production.ini
-      
-      # База данных
+      # Настройки подключения к БД
       DB_HOST: db
-      DB_PORT: 5432
       DB_NAME: nextgisweb
       DB_USER: nextgis
-      DB_PASSWORD: ${DB_PASSWORD:-change_me_strong_password}
+      DB_PASSWORD: ${DB_PASSWORD:-StrongPassword123!}
       
-      # Администратор
+      # Админка
       NGW_ADMIN_LOGIN: admin
       NGW_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       
-      # Секретный ключ (нужно изменить в .env или переменных Portainer)
-      SECRET_KEY: ${SECRET_KEY:-change_me_secret_key_12345}
-      
-      # Настройки брендинга (передаются как env, можно использовать в CSS через JS или генерацию)
-      BRANDING_PRIMARY_COLOR: ${BRANDING_PRIMARY_COLOR:-#2c3e50}
-      BRANDING_SECONDARY_COLOR: ${BRANDING_SECONDARY_COLOR:-#3498db}
-      BRANDING_ACCENT_COLOR: ${BRANDING_ACCENT_COLOR:-#e74c3c}
-      BRANDING_LOGO_TEXT: ${BRANDING_LOGO_TEXT:-NextGIS Custom}
+      # Секретный ключ
+      SECRET_KEY: ${SECRET_KEY:-ChangeThisSecretKeyImmediately!}
       
     volumes:
       - ngw_data:/var/www/nextgisweb
@@ -60,10 +49,10 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 60s
+      retries: 5
+      start_period: 120s # Долгий старт первой инициализации
 
 volumes:
-  pgdata:
+  pg_data:
   ngw_data:
   ngw_config:
