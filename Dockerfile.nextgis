@@ -1,45 +1,54 @@
-FROM ubuntu:22.04
+# Используем официальный образ NextGIS Web как базу
+FROM nextgis/nextgis_web:latest
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=C.UTF-8
+# Переменные для путей кастомизации
+ENV CUSTOM_CSS_PATH=/usr/local/lib/python3.10/dist-packages/nextgisweb/static/css/custom-theme.css
+ENV CUSTOM_LOGO_PATH=/usr/local/lib/python3.10/dist-packages/nextgisweb/static/img/logo.svg
 
-# Установка зависимостей
-RUN apt-get update && apt-get install -y \
-    software-properties-common \
-    curl \
-    gnupg \
-    lsb-release \
-    python3-pip \
-    python3-dev \
-    build-essential \
-    libxml2-dev \
-    libxslt1-dev \
-    libgeos-dev \
-    libgdal-dev \
-    libpq-dev \
-    locales \
-    wget \
-    supervisor \
-    nginx \
-    && rm -rf /var/lib/apt/lists/*
+# Копируем файлы кастомизации в образ
+# Примечание: путь к статике может отличаться в зависимости от версии Python в образе.
+# Если версия изменится, нужно будет поправить путь выше или использовать поиск.
 
-# Добавление репозитория NextGIS
-RUN curl -fsSL https://repo.nextgis.com/pub/nextgis-stable/linux/ubuntu/gpg.key | gpg --dearmor -o /usr/share/keyrings/nextgis-archive-keyring.gpg
-RUN echo "deb [signed-by=/usr/share/keyrings/nextgis-archive-keyring.gpg] https://repo.nextgis.com/pub/nextgis-stable/linux/ubuntu/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/nextgis.list
+COPY customization/css/custom-theme.css /tmp/custom-theme.css
+COPY customization/assets/logo.svg /tmp/logo.svg
 
-RUN apt-get update && apt-get install -y \
-    nextgisweb \
-    nextgisweb-libpq \
-    && rm -rf /var/lib/apt/lists/*
+# Скрипт инициализации, который выполнится при первом запуске контейнера
+# Он скопирует наши файлы в системную папку NextGIS
+RUN echo '#!/bin/bash \n\
+set -e \n\
+echo "Applying custom design..." \n\
+# Находим реальную директорию пакета nextgisweb \n\
+NGW_DIR=$(python3 -c "import nextgisweb, os; print(os.path.dirname(nextgisweb.__file__))") \n\
+STATIC_DIR="$NGW_DIR/static" \n\
+CSS_DIR="$STATIC_DIR/css" \n\
+IMG_DIR="$STATIC_DIR/img" \n\
+\
+# Создаем директории если нет \n\
+mkdir -p "$CSS_DIR" \n\
+mkdir -p "$IMG_DIR" \n\
+\n\
+# Копируем файлы \n\
+cp /tmp/custom-theme.css "$CSS_DIR/custom-theme.css" \n\
+cp /tmp/logo.svg "$IMG_DIR/logo.svg" \n\
+\
+# Внедряем подключение CSS в основной шаблон, если еще не внедрено \n\
+BASE_TEMPLATE="$NGW_DIR/pyramid/templates/master.mako" \n\
+if ! grep -q "custom-theme.css" "$BASE_TEMPLATE"; then \n\
+    sed -i "s|</head>|    <link rel=\"stylesheet\" href=\"/static/css/custom-theme.css\">\n</head>|" "$BASE_TEMPLATE"; \n\
+fi \n\
+\
+# Заменяем стандартный логотип на наш (резервная копия оригинала) \n\
+if [ ! -f "$IMG_DIR/logo.svg.bak" ]; then \n\
+    mv "$IMG_DIR/logo.svg" "$IMG_DIR/logo.svg.bak" 2>/dev/null || true; \n\
+fi \n\
+cp /tmp/logo.svg "$IMG_DIR/logo.svg" \n\
+\
+echo "Custom design applied successfully!" \n\
+' > /entrypoint.sh
 
-# Настройка конфигурации
-RUN mkdir -p /etc/nextgisweb
-COPY nextgisweb.cfg.template /etc/nextgisweb/nextgisweb.cfg
-
-# Скрипт запуска
-COPY entrypoint.sh /entrypoint.sh
+# Делаем скрипт исполняемым
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8080
-
+# Переопределяем точку входа
 ENTRYPOINT ["/entrypoint.sh"]
+CMD ["nextgisweb", "serve", "--bind", "0.0.0.0:8000"]
