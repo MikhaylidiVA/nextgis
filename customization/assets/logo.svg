@@ -1,0 +1,20 @@
+<!-- NextGIS Web Custom Logo SVG -->
+<!-- Replace this with your own logo -->
+<svg width="200" height="50" viewBox="0 0 200 50" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background (optional) -->
+  <rect width="200" height="50" fill="transparent"/>
+  
+  <!-- Logo icon - customize or replace -->
+  <circle cx="25" cy="25" r="18" fill="#2563eb" opacity="0.9"/>
+  <path d="M 18 25 L 25 18 L 32 25 L 25 32 Z" fill="white"/>
+  
+  <!-- Logo text - customize -->
+  <text x="55" y="30" font-family="Inter, Roboto, sans-serif" font-size="20" font-weight="600" fill="white">
+    NextGIS Web
+  </text>
+  
+  <!-- Optional tagline -->
+  <text x="55" y="42" font-family="Inter, Roboto, sans-serif" font-size="10" font-weight="400" fill="rgba(255,255,255,0.8)">
+    Geographic Information System
+  </text>
+</svg>
