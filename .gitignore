@@ -1,32 +1,72 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
+```
+# Environment variables
+.env
+.env.local
+.env.*
 
-# C extensions
-*.so
-
-# Distribution / packaging
-*.egg-info
-build/
-dist/
-sdist/
+# Dependencies
 node_modules/
+.venv/
+venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+target/
+.gradle/
 
-# Translations
-*.mo
-*.pot
-*.jed
+# Build artifacts
+dist/
+build/
+*.pyc
+*.class
+*.o
+*.exe
+*.dll
+*.so
+*.a
+*.obj
+*.out
 
-# Generated client code
-**/nodepkg/**/*.inc.*
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
 
-# Sphinx documentation
-doc/_build/
-doc/*/_build/
-*~
+# Logs
+*.log
 
-# IDE
-.idea
-.vscode
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
-XDG_CACHE_HOME
+# System files
+.DS_Store
+Thumbs.db
+
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+```

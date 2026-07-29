@@ -1,0 +1,331 @@
+/* 
+ * NextGIS Web Custom Theme
+ * Complete design customization
+ * 
+ * This file overrides the default NextGIS Web styles
+ * Place your custom CSS variables and style overrides here
+ */
+
+:root {
+  /* ===========================================
+   * PRIMARY COLOR SCHEME
+   * Change these to match your brand colors
+   * =========================================== */
+  
+  /* Primary brand color - used for main actions, links, headers */
+  --primary: #2563eb;
+  
+  /* Secondary color - used for backgrounds and subtle elements */
+  --secondary: #f1f5f9;
+  
+  /* Accent color - used for highlights and special elements */
+  --accent: #10b981;
+  
+  /* Danger/Error color - used for errors and destructive actions */
+  --danger: #ef4444;
+  --error: #ef4444;
+  
+  /* Warning color - used for warnings and cautions */
+  --warning: #f59e0b;
+  
+  /* Success color - used for success states */
+  --success: #22c55e;
+  
+  /* Text colors on colored backgrounds */
+  --on-primary-text: #ffffff;
+  --on-secondary-text: #1e293b;
+  --on-accent-text: #ffffff;
+  --on-error-text: #ffffff;
+  --on-warning-text: #ffffff;
+}
+
+:root {
+  /* ===========================================
+   * TYPOGRAPHY
+   * Customize fonts and text styling
+   * =========================================== */
+  
+  /* Font families */
+  --ngw-text-font-family-base: 'Inter', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --ngw-head-font-family-base: 'Inter', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  
+  /* Font weights */
+  --ngw-text-font-weight-normal: 400;
+  --ngw-text-font-weight-bold: 600;
+  
+  /* Font sizes */
+  --text-base-size: 14px;
+  --text-large-size: 16px;
+  --heading-1-size: 32px;
+  --heading-2-size: 24px;
+  --heading-3-size: 20px;
+}
+
+:root {
+  /* ===========================================
+   * GLOBAL STYLES
+   * Border radius, spacing, and other globals
+   * =========================================== */
+  
+  /* Border radius for rounded corners */
+  --border-radius-root: 8px;
+  --border-radius-small: 4px;
+  --border-radius-large: 12px;
+  
+  /* Link colors */
+  --link-color: var(--primary);
+  --link-hover-color: #1d4ed8;
+  
+  /* Icon colors */
+  --icon-color: #64748b;
+  
+  /* Hover effects */
+  --hover-opacity-root: 0.08;
+  
+  /* Surface backgrounds */
+  --surface-bg-success: rgba(34, 197, 94, 0.15);
+  --surface-bg-danger: rgba(239, 68, 68, 0.15);
+  --surface-bg-warning: rgba(245, 158, 11, 0.15);
+  --surface-bg-info: rgba(37, 99, 235, 0.15);
+}
+
+:root {
+  /* ===========================================
+   * TEXT COLORS
+   * =========================================== */
+  
+  /* Base text color */
+  --text-base: #0f172a;
+  
+  /* Secondary/muted text */
+  --text-secondary: #64748b;
+  
+  /* Disabled text */
+  --text-disabled: #94a3b8;
+  
+  /* Inverse text (on dark backgrounds) */
+  --text-inverse: #ffffff;
+}
+
+:root {
+  /* ===========================================
+   * DIVIDERS AND BORDERS
+   * =========================================== */
+  
+  /* Divider color */
+  --divider-color: rgba(148, 163, 184, 0.2);
+  
+  /* Input border color */
+  --input-border-color: rgba(148, 163, 184, 0.4);
+  
+  /* Focus ring color */
+  --focus-ring-color: rgba(37, 99, 235, 0.2);
+}
+
+:root {
+  /* ===========================================
+   * SHADOWS
+   * Add depth with shadows
+   * =========================================== */
+  
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+/* ===========================================
+ * COMPONENT-SPECIFIC OVERRIDES
+ * =========================================== */
+
+/* Header styling */
+.ngw-pyramid-layout-header {
+  background: linear-gradient(135deg, var(--primary) 0%, #1e40af 100%) !important;
+  box-shadow: var(--shadow-md);
+}
+
+.ngw-pyramid-layout-header::before {
+  opacity: 0 !important;
+}
+
+.ngw-pyramid-layout-header > div.text {
+  color: var(--on-primary-text) !important;
+  font-weight: 600 !important;
+  font-size: 18px !important;
+  letter-spacing: -0.025em;
+}
+
+/* Main content area */
+.ngw-pyramid-layout-main {
+  background-color: #f8fafc;
+  border-radius: var(--border-radius-large);
+}
+
+/* Sidebar styling */
+.ngw-pyramid-layout-sidebar {
+  background: #ffffff;
+  border-radius: var(--border-radius-large);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Buttons */
+.ant-btn-primary {
+  background-color: var(--primary) !important;
+  border-color: var(--primary) !important;
+  border-radius: var(--border-radius-root) !important;
+  font-weight: 500 !important;
+  transition: all 0.2s ease !important;
+}
+
+.ant-btn-primary:hover {
+  background-color: #1d4ed8 !important;
+  border-color: #1d4ed8 !important;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+/* Cards and panels */
+.ant-card {
+  border-radius: var(--border-radius-large) !important;
+  box-shadow: var(--shadow-sm) !important;
+  border: 1px solid var(--divider-color) !important;
+}
+
+/* Tables */
+.ant-table {
+  border-radius: var(--border-radius-root) !important;
+  overflow: hidden;
+}
+
+.ant-table-thead > tr > th {
+  background-color: var(--secondary) !important;
+  font-weight: 600 !important;
+  color: var(--text-base) !important;
+}
+
+/* Forms and inputs */
+.ant-input,
+.ant-select-selector,
+.ant-input-number {
+  border-radius: var(--border-radius-root) !important;
+  border-color: var(--input-border-color) !important;
+}
+
+.ant-input:focus,
+.ant-select-focused .ant-select-selector,
+.ant-input-number-focused {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 2px var(--focus-ring-color) !important;
+}
+
+/* Modals */
+.ant-modal {
+  border-radius: var(--border-radius-large) !important;
+  box-shadow: var(--shadow-xl) !important;
+}
+
+.ant-modal-header {
+  border-radius: var(--border-radius-large) var(--border-radius-large) 0 0 !important;
+  background-color: var(--secondary) !important;
+}
+
+/* Navigation menu */
+.ant-menu {
+  border-radius: var(--border-radius-root) !important;
+}
+
+.ant-menu-item-selected {
+  background-color: var(--secondary) !important;
+  color: var(--primary) !important;
+  font-weight: 500 !important;
+}
+
+/* Alerts and notifications */
+.ant-alert-success {
+  background-color: var(--surface-bg-success) !important;
+  border-color: var(--success) !important;
+}
+
+.ant-alert-error {
+  background-color: var(--surface-bg-danger) !important;
+  border-color: var(--error) !important;
+}
+
+.ant-alert-warning {
+  background-color: var(--surface-bg-warning) !important;
+  border-color: var(--warning) !important;
+}
+
+/* Tags */
+.ant-tag {
+  border-radius: var(--border-radius-small) !important;
+  font-weight: 500 !important;
+}
+
+/* Badges */
+.ant-badge-count {
+  background-color: var(--danger) !important;
+}
+
+/* Scrollbar customization */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--secondary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--icon-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* ===========================================
+ * RESPONSIVE ADJUSTMENTS
+ * =========================================== */
+
+@media (max-width: 768px) {
+  :root {
+    --text-base-size: 13px;
+    --heading-1-size: 28px;
+    --heading-2-size: 22px;
+    --heading-3-size: 18px;
+  }
+  
+  .ngw-pyramid-layout-main {
+    padding: 16px 8px 8px 8px !important;
+  }
+}
+
+/* ===========================================
+ * DARK MODE SUPPORT (Optional)
+ * Uncomment to enable dark mode
+ * =========================================== */
+
+/*
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text-base: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --secondary: #1e293b;
+    --divider-color: rgba(148, 163, 184, 0.2);
+    --input-border-color: rgba(148, 163, 184, 0.4);
+  }
+  
+  body {
+    background-color: #0f172a;
+  }
+  
+  .ngw-pyramid-layout-sidebar,
+  .ant-card {
+    background-color: #1e293b !important;
+  }
+}
+*/
