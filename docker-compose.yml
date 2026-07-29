@@ -1,163 +1,81 @@
 version: '3.8'
 
 services:
-  # PostgreSQL database with PostGIS
   nextgisweb-db:
-    image: postgis/postgis:15-3.4-alpine
+    image: postgis/postgis:15-3.4
     container_name: nextgisweb-db
-    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER:-nextgisweb}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
-      POSTGRES_DB: ${DB_NAME:-nextgisweb}
-      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_DB: nextgisweb
+      POSTGRES_USER: nextgis
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_strong_password}
     volumes:
-      - nextgisweb-db-data:/var/lib/postgresql/data
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - nextgisweb-network
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-nextgisweb} -d ${DB_NAME:-nextgisweb}"]
+      test: ["CMD-SHELL", "pg_isready -U nextgis -d nextgisweb"]
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
+    networks:
+      - nextgis-net
 
-  # NextGIS Web application
   nextgisweb-app:
-    image: nextgis/nextgis-web:4.3.1
+    build:
+      context: .
+      dockerfile: Dockerfile.nextgis
     container_name: nextgisweb-app
-    restart: unless-stopped
     depends_on:
       nextgisweb-db:
         condition: service_healthy
     environment:
-      # Database connection
-      NGW_DATABASE_HOST: nextgisweb-db
-      NGW_DATABASE_PORT: 5432
-      NGW_DATABASE_NAME: ${DB_NAME:-nextgisweb}
-      NGW_DATABASE_USER: ${DB_USER:-nextgisweb}
-      NGW_DATABASE_PASSWORD: ${DB_PASSWORD:-changeme}
-      
-      # Application settings
-      NGW_APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
-      NGW_SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
-      
-      # File storage
-      NGW_FILE_STORAGE_PATH: /var/nextgisweb/data
-      
-      # Locale (optional)
-      NGW_LOCALE_DEFAULT: ${LOCALE_DEFAULT:-en}
-      
-      # Admin credentials
-      NGW_ADMIN_LOGIN: ${ADMIN_LOGIN:-administrator}
-      NGW_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
-      
-      # Custom branding
-      NGW_BRANDING_ENABLED: 'true'
-      NGW_BRANDING_PRIMARY_COLOR: ${BRANDING_PRIMARY_COLOR:-#2563eb}
-      NGW_BRANDING_SECONDARY_COLOR: ${BRANDING_SECONDARY_COLOR:-#64748b}
-      NGW_BRANDING_ACCENT_COLOR: ${BRANDING_ACCENT_COLOR:-#10b981}
-      NGW_BRANDING_LOGO_TEXT: ${BRANDING_LOGO_TEXT:-NextGIS Web}
-      NGW_BRANDING_FAVICON: /var/nextgisweb/assets/favicon.ico
-      NGW_BRANDING_LOGO: /var/nextgisweb/assets/logo.svg
-      
-      # Performance
-      NGW_UWSGI_PROCESSES: ${UWSGI_PROCESSES:-4}
-      NGW_UWSGI_THREADS: ${UWSGI_THREADS:-2}
-      
-      # Logging
-      NGW_LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      
-      # Feature flags
-      NGW_FEATURE_VERSIONING: 'true'
-      NGW_FEATURE_ATTACHMENTS: 'true'
-      NGW_FEATURE_QGIS_INTEGRATION: 'true'
+      NGW_CONFIG_PATH: /etc/nextgisweb
+      DB_HOST: nextgisweb-db
+      DB_NAME: nextgisweb
+      DB_USER: nextgis
+      DB_PASSWORD: ${DB_PASSWORD:-change_me_strong_password}
+      SECRET_KEY: ${SECRET_KEY:-change_me_secret_key}
+      ADMIN_LOGIN: admin
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      # Переменные для кастомизации дизайна (передаются в контейнер)
+      BRANDING_PRIMARY_COLOR: ${BRANDING_PRIMARY_COLOR:-#2c3e50}
+      BRANDING_SECONDARY_COLOR: ${BRANDING_SECONDARY_COLOR:-#3498db}
+      BRANDING_ACCENT_COLOR: ${BRANDING_ACCENT_COLOR:-#e74c3c}
+      BRANDING_LOGO_TEXT: ${BRANDING_LOGO_TEXT:-NextGIS Custom}
     volumes:
-      - nextgisweb-data:/var/nextgisweb/data
-      - nextgisweb-assets:/var/nextgisweb/assets
-      - ./customization:/var/nextgisweb/customization:ro
+      - ./customization/css/custom-theme.css:/var/www/nextgisweb/static/css/custom-theme.css:ro
+      - ./customization/assets/logo.svg:/var/www/nextgisweb/static/img/logo.svg:ro
+      - appdata:/var/www/nextgisweb/data
     ports:
-      - "${APP_PORT:-8080}:8080"
-    networks:
-      - nextgisweb-network
+      - "8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 4G
-        reservations:
-          cpus: '1.0'
-          memory: 1G
-    labels:
-      - "nextgis.web.version=latest"
-      - "nextgis.web.component=app"
+    networks:
+      - nextgis-net
+    restart: unless-stopped
 
-  # Nginx reverse proxy (optional, for production)
+  # Nginx прокси (опционально, можно убрать если не нужен)
   nextgisweb-proxy:
     image: nginx:alpine
     container_name: nextgisweb-proxy
-    restart: unless-stopped
     depends_on:
       - nextgisweb-app
-    environment:
-      - APP_HOST=nextgisweb-app
-      - APP_PORT=8080
     ports:
-      - "${PROXY_PORT:-80}:80"
-      - "${PROXY_SSL_PORT:-443}:443"
+      - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./ssl:/etc/nginx/ssl:ro
-      - nextgisweb-assets:/var/www/assets:ro
     networks:
-      - nextgisweb-network
+      - nextgis-net
     profiles:
       - production
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
 
 volumes:
-  nextgisweb-db-data:
-    driver: local
-    name: nextgisweb-db-data
-    labels:
-      - "nextgis.web.volume=database"
-  nextgisweb-data:
-    driver: local
-    name: nextgisweb-data
-    labels:
-      - "nextgis.web.volume=data"
-  nextgisweb-assets:
-    driver: local
-    name: nextgisweb-assets
-    labels:
-      - "nextgis.web.volume=assets"
+  pgdata:
+  appdata:
 
 networks:
-  nextgisweb-network:
+  nextgis-net:
     driver: bridge
-    name: nextgisweb-network
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
