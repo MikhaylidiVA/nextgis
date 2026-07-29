@@ -32,7 +32,7 @@ services:
 
   # NextGIS Web application
   nextgisweb-app:
-    image: nextgis/nextgisweb:latest
+    image: nextgis/nextgis-web:4.3.1
     container_name: nextgisweb-app
     restart: unless-stopped
     depends_on:
